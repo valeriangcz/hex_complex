@@ -1,0 +1,21 @@
+workspace_root: ../../..
+map_config: src/map_robot_voxles/config/complex_surface4.yaml
+robot_config: src/map_robot_voxles/config/hex_magnetic.yaml
+output_dir: data/runs/trajectories
+viewer:
+  stride: 16
+  curve_dt: 0.05
+  speed: 1.0
+optimizer:
+  presample_count: 51
+  sampling_rho_interval: 0.02
+  sampling_phi_interval: 0.06981317007977318
+  max_retraction_iterations: 2
+  optimizer_max_iterations: 2
+  optimizer_max_function_evaluations: 64
+torch_optimizer:
+  torch_precision: mixed
+  torch_population_chunk_size: 8
+  torch_pose_chunk_size: 64
+  cma_max_generations: 20
+  max_retraction_iterations: 10

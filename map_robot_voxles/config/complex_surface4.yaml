@@ -1,0 +1,17 @@
+workspace_root: ../../..
+source_mesh: src/map_robot_voxles/resources/maps/complex_surface4.STL
+point_map_file: data/maps/complex_surface4/complex_surface4_point_map.npz
+env_cache_file: data/maps/complex_surface4/env_voxels.npz
+manifest_file: data/maps/complex_surface4/manifest.json
+env_voxel_scale: 0.01
+point_map:
+  voxel_size: 0.02
+  suction_diameter: 0.04
+  normal_radius: 0.04
+  plane_error_threshold: 100000.0
+  edge_normal_angle_threshold: 0.7853981633974483
+  boundary_angle_gap_threshold: 2.0943951023931953
+  source_scale: 1.0
+  surface_sample_spacing: 0.01
+  suction_to_foot_offset: 0.03
+  verbose: true

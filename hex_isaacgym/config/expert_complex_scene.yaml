@@ -1,0 +1,21 @@
+# Source-workspace defaults. Override data_root in launch for external caches.
+workspace_root: ../../..
+expert_type: complex
+
+
+resources:
+  backend_config: package://hex_isaacgym/config/complex_surface4.yaml
+  body_leg_mesh: package://hex_kinematic/resources/hex_magnetic/body_leg_collision.STL
+  body_env_mesh: package://hex_kinematic/resources/hex_magnetic/body_env_collision.STL
+  point_map_file: ${DATA_ROOT}/maps/complex_surface4/complex_surface4_point_map.npz
+  env_cache_file: ${DATA_ROOT}/maps/complex_surface4/env_voxels.npz
+  robot_cache_dir: ${DATA_ROOT}/robots/hex_magnetic
+  se3_path: ${DATA_ROOT}/trajectories/teleop_demo_20261105_120503.json
+
+coordinator:
+  settling_steps: 100
+  completion_translation: 0.02
+  completion_rotation: 0.05
+  failure_path_distance: 1.0
+  contact_force_threshold: 10.0
+  contact_loss_steps: 50

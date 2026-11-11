@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>hex_isaacgym</name>
+  <version>0.1.0</version>
+  <description>Minimal Isaac Gym backend and ROS1 ExpertComplex coordinator.</description>
+  <maintainer email="artrc@todo.todo">artrc</maintainer>
+  <license>BSD-3-Clause</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>hex_expert</depend>
+  <depend>hex_kinematic</depend>
+  <depend>hex_se3</depend>
+  <depend>nav_msgs</depend>
+  <depend>rosgraph_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <export/>
+</package>

@@ -1,0 +1,13 @@
+workspace_root: ../../..
+urdf_file: src/hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
+body_leg_mesh: src/hex_kinematic/resources/hex_magnetic/body_leg_collision.STL
+body_env_mesh: src/hex_kinematic/resources/hex_magnetic/body_env_collision.STL
+cache_dir: data/robots/hex_magnetic
+manifest_file: data/robots/hex_magnetic/manifest.json
+robot_voxels:
+  leg_xyz_range: [[-0.14, 0.38], [-0.38, 0.38], [-0.4, 0.4]]
+  body_xyz_range: [[-0.4, 0.4], [-0.5, 0.5], [-0.2, 0.2]]
+  voxel_scale: 0.01
+  sphere_scale: 0.017453292519943295
+  ankle_collision_radius: 0.05
+  leg_body_end_clearance: 0.03
