@@ -8,9 +8,11 @@
 #include <vector>
 
 #include <ros/ros.h>
-#include <std_msgs/Float64MultiArray.h>
 
-#include "hardware_interface/damiao.h"
+#include <dm_motor_fusion/MultiLegCommand.h>
+#include <dm_motor_fusion/MultiLegState.h>
+
+#include "damiao.h"
 
 namespace
 {
@@ -53,6 +55,133 @@ int toControlModeCode(const int mode)
   }
   return static_cast<int>(damiao::Control_Mode_Code::POS_VEL);
 }
+
+// 关节顺序与消息字段对应：0=脚踝(ankle), 1=膝关节(knee), 2=大腿(thigh)
+// 即组内 CAN ID 从小到大：如 LF 腿 1/2/3 = 脚踝/膝/大腿
+double jointPos(const dm_motor_fusion::LegCommand& leg, std::size_t joint)
+{
+  switch (joint)
+  {
+    case 0:
+      return leg.ankle_pos;
+    case 1:
+      return leg.knee_pos;
+    default:
+      return leg.thigh_pos;
+  }
+}
+
+double jointVel(const dm_motor_fusion::LegCommand& leg, std::size_t joint)
+{
+  switch (joint)
+  {
+    case 0:
+      return leg.ankle_vel;
+    case 1:
+      return leg.knee_vel;
+    default:
+      return leg.thigh_vel;
+  }
+}
+
+double jointTau(const dm_motor_fusion::LegCommand& leg, std::size_t joint)
+{
+  switch (joint)
+  {
+    case 0:
+      return leg.ankle_tau;
+    case 1:
+      return leg.knee_tau;
+    default:
+      return leg.thigh_tau;
+  }
+}
+
+double jointKp(const dm_motor_fusion::LegCommand& leg, std::size_t joint)
+{
+  switch (joint)
+  {
+    case 0:
+      return leg.ankle_kp;
+    case 1:
+      return leg.knee_kp;
+    default:
+      return leg.thigh_kp;
+  }
+}
+
+double jointKd(const dm_motor_fusion::LegCommand& leg, std::size_t joint)
+{
+  switch (joint)
+  {
+    case 0:
+      return leg.ankle_kd;
+    case 1:
+      return leg.knee_kd;
+    default:
+      return leg.thigh_kd;
+  }
+}
+
+const dm_motor_fusion::LegCommand& legCommandOf(const dm_motor_fusion::MultiLegCommand& msg, std::size_t group_idx)
+{
+  switch (group_idx)
+  {
+    case 0:
+      return msg.left_front;
+    case 1:
+      return msg.left_mid;
+    case 2:
+      return msg.left_back;
+    case 3:
+      return msg.right_front;
+    case 4:
+      return msg.right_mid;
+    default:
+      return msg.right_back;
+  }
+}
+
+dm_motor_fusion::LegState& legStateOf(dm_motor_fusion::MultiLegState& msg, std::size_t group_idx)
+{
+  switch (group_idx)
+  {
+    case 0:
+      return msg.left_front;
+    case 1:
+      return msg.left_mid;
+    case 2:
+      return msg.left_back;
+    case 3:
+      return msg.right_front;
+    case 4:
+      return msg.right_mid;
+    default:
+      return msg.right_back;
+  }
+}
+
+void setJointState(dm_motor_fusion::LegState& leg, std::size_t joint, double pos, double vel, double tau)
+{
+  switch (joint)
+  {
+    case 0:
+      leg.ankle_pos = pos;
+      leg.ankle_vel = vel;
+      leg.ankle_tau = tau;
+      break;
+    case 1:
+      leg.knee_pos = pos;
+      leg.knee_vel = vel;
+      leg.knee_tau = tau;
+      break;
+    default:
+      leg.thigh_pos = pos;
+      leg.thigh_vel = vel;
+      leg.thigh_tau = tau;
+      break;
+  }
+}
 }  // namespace
 
 class DmMotorFusionNode
@@ -68,19 +197,8 @@ public:
 
     initMotors();
 
-    lf_sub_ = nh_.subscribe("/LF/sita_des", 20, &DmMotorFusionNode::lfCallback, this);
-    lm_sub_ = nh_.subscribe("/LM/sita_des", 20, &DmMotorFusionNode::lmCallback, this);
-    lb_sub_ = nh_.subscribe("/LB/sita_des", 20, &DmMotorFusionNode::lbCallback, this);
-    rf_sub_ = nh_.subscribe("/RF/sita_des", 20, &DmMotorFusionNode::rfCallback, this);
-    rm_sub_ = nh_.subscribe("/RM/sita_des", 20, &DmMotorFusionNode::rmCallback, this);
-    rb_sub_ = nh_.subscribe("/RB/sita_des", 20, &DmMotorFusionNode::rbCallback, this);
-
-    lf_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/LF/sita_cur", 20);
-    lm_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/LM/sita_cur", 20);
-    lb_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/LB/sita_cur", 20);
-    rf_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/RF/sita_cur", 20);
-    rm_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/RM/sita_cur", 20);
-    rb_pub_ = nh_.advertise<std_msgs::Float64MultiArray>("/RB/sita_cur", 20);
+    cmd_sub_ = nh_.subscribe("/sita_des", 20, &DmMotorFusionNode::commandCallback, this);
+    state_pub_ = nh_.advertise<dm_motor_fusion::MultiLegState>("/sita_cur", 20);
 
     control_timer_ = nh_.createTimer(ros::Duration(1.0 / control_hz_), &DmMotorFusionNode::controlLoop, this);
     status_timer_ = nh_.createTimer(ros::Duration(1.0 / status_hz_), &DmMotorFusionNode::publishStatus, this);
@@ -131,6 +249,7 @@ private:
       motors_.emplace(logical_id, runtime);
     }
 
+    // 组内 ID 从小到大依次为：脚踝, 膝关节, 大腿
     groups_ = {
         LegGroup{"LF", {1, 2, 3}, {1.0, 1.0, -1.0}},
         LegGroup{"LM", {4, 5, 6}, {1.0, 1.0, -1.0}},
@@ -140,49 +259,44 @@ private:
         LegGroup{"RB", {16, 17, 18}, {1.0, -1.0, 1.0}},
     };
 
-    ROS_INFO("dm_motor_fusion ready on %s, using single CAN bus and 18 motors", can_interface_.c_str());
+    ROS_INFO("dm_motor_fusion ready on %s: cmd /sita_des, state /sita_cur, 18 motors", can_interface_.c_str());
   }
 
-  void lfCallback(const std_msgs::Float64MultiArray::ConstPtr& msg) { legCommandCallback(0, msg); }
-  void lmCallback(const std_msgs::Float64MultiArray::ConstPtr& msg) { legCommandCallback(1, msg); }
-  void lbCallback(const std_msgs::Float64MultiArray::ConstPtr& msg) { legCommandCallback(2, msg); }
-  void rfCallback(const std_msgs::Float64MultiArray::ConstPtr& msg) { legCommandCallback(3, msg); }
-  void rmCallback(const std_msgs::Float64MultiArray::ConstPtr& msg) { legCommandCallback(4, msg); }
-  void rbCallback(const std_msgs::Float64MultiArray::ConstPtr& msg) { legCommandCallback(5, msg); }
-
-  void legCommandCallback(std::size_t group_idx, const std_msgs::Float64MultiArray::ConstPtr& msg)
+  void commandCallback(const dm_motor_fusion::MultiLegCommand::ConstPtr& msg)
   {
-    // motor_control format:
-    // [mode, pos1, pos2, pos3, vel1, vel2, vel3]
     std::lock_guard<std::mutex> lock(mutex_);
-    if (group_idx >= groups_.size() || msg->data.size() < 7)
-    {
-      return;
-    }
-    auto& group = groups_[group_idx];
-    const int mode = static_cast<int>(std::llround(msg->data[0]));
+    const int option = msg->option;
+    current_option_ = option;
 
-    for (std::size_t i = 0; i < 3; ++i)
+    for (std::size_t g = 0; g < groups_.size(); ++g)
     {
-      auto& motor = motors_.at(group.ids[i]);
-      applyModeFromCommand(motor, mode);
-      motor.high_level_mode = mode;
-      if (mode == static_cast<int>(HighLevelMode::Disable))
+      const auto& leg = legCommandOf(*msg, g);
+      for (std::size_t j = 0; j < 3; ++j)
       {
-        continue;
+        auto& motor = motors_.at(groups_[g].ids[j]);
+        applyModeFromCommand(motor, option);
+        if (option == static_cast<int>(HighLevelMode::Disable))
+        {
+          continue;
+        }
+        // 零力矩模式已在 applyModeFromCommand 中置零，不使用消息数据
+        if (option == static_cast<int>(HighLevelMode::ZeroTorque))
+        {
+          continue;
+        }
+        motor.cmd_pos = jointPos(leg, j) * groups_[g].pn[j];
+        motor.cmd_vel = jointVel(leg, j);
+        motor.cmd_tau = jointTau(leg, j);
+        motor.cmd_kp = jointKp(leg, j);
+        motor.cmd_kd = jointKd(leg, j);
+        motor.has_command = true;
       }
-      motor.cmd_pos = msg->data[1 + i] * group.pn[i];
-      motor.cmd_vel = msg->data[4 + i];
-      motor.cmd_tau = 0.0;
-      motor.cmd_kp = 100.0;
-      motor.cmd_kd = 1.0;
-      motor.has_command = true;
     }
   }
 
-  void applyModeFromCommand(MotorRuntime& motor, const int mode)
+  void applyModeFromCommand(MotorRuntime& motor, const int option)
   {
-    if (mode == static_cast<int>(HighLevelMode::Disable))
+    if (option == static_cast<int>(HighLevelMode::Disable))
     {
       setMotorEnable(motor, false);
       motor.has_command = false;
@@ -190,10 +304,10 @@ private:
     }
 
     setMotorEnable(motor, true);
-    const int target_mode = toControlModeCode(mode);
+    const int target_mode = toControlModeCode(option);
     switchMotorMode(motor, target_mode);
 
-    if (mode == static_cast<int>(HighLevelMode::ZeroTorque))
+    if (option == static_cast<int>(HighLevelMode::ZeroTorque))
     {
       motor.cmd_pos = 0.0;
       motor.cmd_vel = 0.0;
@@ -268,52 +382,29 @@ private:
   void publishStatus(const ros::TimerEvent&)
   {
     std::lock_guard<std::mutex> lock(mutex_);
-    publishLegGroup(groups_[0], lf_pub_);
-    publishLegGroup(groups_[1], lm_pub_);
-    publishLegGroup(groups_[2], lb_pub_);
-    publishLegGroup(groups_[3], rf_pub_);
-    publishLegGroup(groups_[4], rm_pub_);
-    publishLegGroup(groups_[5], rb_pub_);
-  }
+    dm_motor_fusion::MultiLegState msg;
+    msg.option = current_option_;
 
-  void publishLegGroup(const LegGroup& group, ros::Publisher& pub)
-  {
-    // motor_control format:
-    // [pos1, pos2, pos3, tau1, tau2, tau3, vel1, vel2, vel3]
-    std_msgs::Float64MultiArray msg;
-    msg.data.reserve(9);
-    for (std::size_t i = 0; i < 3; ++i)
+    for (std::size_t g = 0; g < groups_.size(); ++g)
     {
-      const auto& motor = motors_.at(group.ids[i]);
-      msg.data.push_back(static_cast<double>(motor.motor->Get_Position()) * group.pn[i]);
+      auto& leg = legStateOf(msg, g);
+      for (std::size_t j = 0; j < 3; ++j)
+      {
+        const auto& motor = motors_.at(groups_[g].ids[j]);
+        const double pn = groups_[g].pn[j];
+        setJointState(leg, j,
+                      static_cast<double>(motor.motor->Get_Position()) * pn,
+                      static_cast<double>(motor.motor->Get_Velocity()) * pn,
+                      static_cast<double>(motor.motor->Get_tau()) * pn);
+      }
     }
-    for (std::size_t i = 0; i < 3; ++i)
-    {
-      const auto& motor = motors_.at(group.ids[i]);
-      msg.data.push_back(static_cast<double>(motor.motor->Get_tau()) * group.pn[i]);
-    }
-    for (std::size_t i = 0; i < 3; ++i)
-    {
-      const auto& motor = motors_.at(group.ids[i]);
-      msg.data.push_back(static_cast<double>(motor.motor->Get_Velocity()) * group.pn[i]);
-    }
-    pub.publish(msg);
+    state_pub_.publish(msg);
   }
 
   ros::NodeHandle nh_;
   ros::NodeHandle pnh_;
-  ros::Subscriber lf_sub_;
-  ros::Subscriber lm_sub_;
-  ros::Subscriber lb_sub_;
-  ros::Subscriber rf_sub_;
-  ros::Subscriber rm_sub_;
-  ros::Subscriber rb_sub_;
-  ros::Publisher lf_pub_;
-  ros::Publisher lm_pub_;
-  ros::Publisher lb_pub_;
-  ros::Publisher rf_pub_;
-  ros::Publisher rm_pub_;
-  ros::Publisher rb_pub_;
+  ros::Subscriber cmd_sub_;
+  ros::Publisher state_pub_;
   ros::Timer control_timer_;
   ros::Timer status_timer_;
 
@@ -323,6 +414,7 @@ private:
   double status_hz_{100.0};
   int motor_type_{static_cast<int>(damiao::DM4340)};
 
+  int current_option_{static_cast<int>(HighLevelMode::Disable)};
   std::mutex mutex_;
   std::array<LegGroup, 6> groups_;
   std::unordered_map<uint16_t, damiao::DmActData> dm_data_;

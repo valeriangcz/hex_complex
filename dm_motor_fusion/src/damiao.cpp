@@ -1,4 +1,4 @@
-#include "hardware_interface/damiao.h"
+#include "damiao.h"
 
 #include <boost/bind/bind.hpp>
 #include <cmath>
