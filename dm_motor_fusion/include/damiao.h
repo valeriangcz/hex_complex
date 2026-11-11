@@ -11,7 +11,7 @@
 #include <unordered_map>
 #include <vector>
 
-#include "hardware_interface/socketcan.h"
+#include "socketcan.h"
 
 namespace damiao
 {

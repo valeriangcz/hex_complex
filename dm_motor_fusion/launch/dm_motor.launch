@@ -1,0 +1,16 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- dm_motor_fusion 电机控制节点 -->
+  <arg name="can_interface" default="can0"/>
+  <!-- 电机型号：0=DM4310, 1=DM4310_48V, 2=DM4340, 3=DM4340_48V ... -->
+  <arg name="motor_type" default="2"/>
+  <arg name="control_hz" default="100.0"/>
+  <arg name="status_hz" default="100.0"/>
+
+  <node pkg="dm_motor_fusion" type="dm_motor_fusion_node" name="dm_motor_fusion_node" output="screen">
+    <param name="can_interface" value="$(arg can_interface)"/>
+    <param name="motor_type" value="$(arg motor_type)"/>
+    <param name="control_hz" value="$(arg control_hz)"/>
+    <param name="status_hz" value="$(arg status_hz)"/>
+  </node>
+</launch>

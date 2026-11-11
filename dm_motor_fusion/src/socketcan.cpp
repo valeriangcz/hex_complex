@@ -1,4 +1,4 @@
-#include "hardware_interface/socketcan.h"
+#include "socketcan.h"
 
 #include <linux/can.h>
 #include <linux/can/raw.h>
