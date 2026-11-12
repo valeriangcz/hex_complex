@@ -52,3 +52,10 @@ add_dependencies(${PROJECT_NAME}_node
 install(TARGETS ${PROJECT_NAME}_node
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
+install(DIRECTORY launch DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})
+
+if(CATKIN_ENABLE_TESTING)
+  add_executable(dm_feedback_test test/test_feedback.cpp src/damiao.cpp src/socketcan.cpp)
+  target_link_libraries(dm_feedback_test ${catkin_LIBRARIES} pthread)
+  add_test(NAME dm_feedback_validity COMMAND dm_feedback_test)
+endif()

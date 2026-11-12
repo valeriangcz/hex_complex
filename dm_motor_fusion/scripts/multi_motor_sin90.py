@@ -24,15 +24,15 @@ class MultiMotorSinNode:
 
         # 组内 CAN ID 从小到大依次为：脚踝, 膝关节, 大腿
         self.legs = [
-            ("left_front", [1, 2, 3]),
-            ("left_mid", [4, 5, 6]),
-            ("left_back", [7, 8, 9]),
-            ("right_front", [10, 11, 12]),
-            ("right_mid", [13, 14, 15]),
-            ("right_back", [16, 17, 18]),
+            ("lf", [1, 2, 3]),
+            ("lm", [4, 5, 6]),
+            ("lb", [7, 8, 9]),
+            ("rf", [10, 11, 12]),
+            ("rm", [13, 14, 15]),
+            ("rb", [16, 17, 18]),
         ]
 
-        self.pub = rospy.Publisher("/sita_des", MultiLegCommand, queue_size=10)
+        self.pub = rospy.Publisher("/hex/motor/command", MultiLegCommand, queue_size=10)
 
     def _motor_signal(self, motor_id, t):
         # 每个电机频率与相位不同。

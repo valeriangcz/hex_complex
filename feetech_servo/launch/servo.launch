@@ -1,0 +1,12 @@
+<launch>
+  <arg name="config" default="$(find feetech_servo)/para/servo.yaml"/>
+  <arg name="port" default=""/>
+  <arg name="baud_rate" default=""/>
+  <node pkg="feetech_servo" type="feetech_servo_interface"
+        name="feetech_servo_interface" output="screen">
+    <rosparam command="load" file="$(arg config)"/>
+    <!-- Explicit launch arguments take precedence over the YAML file. -->
+    <param if="$(eval arg('port') != '')" name="port" value="$(arg port)"/>
+    <param if="$(eval arg('baud_rate') != '')" name="baud_rate" value="$(arg baud_rate)" type="int"/>
+  </node>
+</launch>

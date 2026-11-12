@@ -34,9 +34,9 @@ class Kinematic:
         self._by = by
         self._leg_names=list(LEG_NAMES)
         for i,name in enumerate(self._leg_names):
-            if name=="LF" or name =="RB":
+            if name=="lf" or name =="rb":
                 self.joints_limits_thigh[i]=[radians(-92),radians(40)]
-            elif name=="RF" or name=="LB":
+            elif name=="rf" or name=="lb":
                 self.joints_limits_thigh[i]=[radians(-40),radians(92)]
             else:
                 self.joints_limits_thigh[i]=[radians(-40),radians(40)]
@@ -45,11 +45,11 @@ class Kinematic:
             #保存腿部基坐标原点在身体坐标系下的位置
             bx = self._bx
             by = self._by
-            if 'M' in name:
+            if 'm' in name:
                 by = 0
-            if 'L' in name:
+            if 'l' in name:
                 bx = -self._bx
-            if 'B' in name:
+            if 'b' in name:
                 by = -self._by
             self.leg_base_p[:,i]=[bx,by,0.0]        
 
@@ -106,7 +106,7 @@ class Kinematic:
         body_mass,body_com = inertial("body")
         leg_models = []
         for leg_name in self._leg_names:
-            prefix = leg_name.lower()
+            prefix = leg_name
             masses = []
             coms = []
             for link_part in link_order:
@@ -141,7 +141,7 @@ class Kinematic:
     def ForwardKinAll(self,joints):
         """Compute all mass-link COMs with a direct, batch analytic FK.
 
-        ``joints`` has shape ``(6, 4)`` in ``LB, LF, LM, RB, RF, RM`` order.
+        ``joints`` has shape ``(6, 4)`` in ``lb, lf, lm, rb, rf, rm`` order.
         Only ``q1..q4`` are active; ball1, ball2 and suck are fixed at zero.
         For a vector ``v``, let ``Zi(v)=Rz(qi)v``,
         ``X(v)=Rx(pi/2)v=[x,-z,y]`` and ``Y(v)=Ry(pi/2)v=[z,y,-x]``.  With

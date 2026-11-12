@@ -1,0 +1,23 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>hex_runner</name><version>0.2.0</version>
+  <description>Shared ROS expert controller for real and simulated hexapods.</description>
+  <maintainer email="val@todo.todo">val</maintainer><license>BSD-3-Clause</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <depend>diagnostic_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>rospy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>dm_motor_fusion</depend>
+  <depend>feetech_servo</depend>
+  <depend>magnetic</depend>
+  <depend>hex_kinematic</depend>
+  <depend>hex_expert</depend>
+  <depend>hex_se3</depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-yaml</exec_depend>
+  <exec_depend>roslaunch</exec_depend>
+  <exec_depend>hex_isaacgym</exec_depend>
+</package>

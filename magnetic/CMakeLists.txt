@@ -1,0 +1,7 @@
+cmake_minimum_required(VERSION 3.0.2)
+project(magnetic)
+find_package(catkin REQUIRED COMPONENTS std_msgs message_generation)
+add_message_files(FILES MagneticCmd.msg MagneticState.msg)
+generate_messages(DEPENDENCIES std_msgs)
+catkin_package(CATKIN_DEPENDS std_msgs message_runtime)
+install(FILES README.md DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

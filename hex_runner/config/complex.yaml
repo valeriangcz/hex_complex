@@ -1,0 +1,74 @@
+workspace_root: ../../..
+expert_type: complex
+pose_source: se3
+control_dt: 0.01
+servo_hz: 20.0
+magnetic_hz: 20.0
+feedback_timeout: 0.5
+motor_kp: 60.0
+motor_kd: 1.0
+motor_torque_limit: 27.0
+robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
+expert_parameters:
+  v_max: 0.08
+  w_max: 0.2
+  stance_maxmove_t: 0.2
+  stance_maxmove_w: 0.4
+resources:
+  body_leg_mesh: package://hex_kinematic/resources/hex_magnetic/body_leg_collision.STL
+  body_env_mesh: package://hex_kinematic/resources/hex_magnetic/body_env_collision.STL
+  point_map_file: ${DATA_ROOT}/maps/complex_surface4/complex_surface4_point_map.npz
+  env_cache_file: ${DATA_ROOT}/maps/complex_surface4/env_voxels.npz
+  robot_cache_dir: ${DATA_ROOT}/robots/hex_magnetic
+  se3_path: ${DATA_ROOT}/trajectories/teleop_demo_20261105_120503.json
+initial_state:
+  pose:
+    position:
+      x: 2.3104510167678747
+      y: 4.4763037345614
+      z: 0.18266166870934133
+    orientation:
+      x: 8.323880732471449e-05
+      y: 0.10452843012500451
+      z: 0.9945215800370322
+      w: 0.0007919643604078812
+  stance_group: 0
+  ik_branch:
+    lf: 1
+    lm: 1
+    lb: 1
+    rf: 1
+    rm: 1
+    rb: 1
+  magnetic:
+    lf: true
+    lm: false
+    lb: true
+    rf: false
+    rm: true
+    rb: false
+  motor_mode: 1
+  servo_enabled: true
+  # 下面两种初始化方式只能启用一种；切换时将另一种整块注释（含 mode）。
+  # 共同字段 pose、stance_group、ik_branch、magnetic 和使能配置保留。
+  # ik_branch: 0 为 ankle 非负分支，1 为 ankle 负分支；joints 模式须与 ankle 符号一致。
+  # foot 不手填：climb=-knee-ankle-pi/2；complex 的 swing 为0，stance 按专家法向计算。
+  mode: joints
+  q:  # 电机关节角，单位 rad；按名称显式填写
+    lf: {thigh: -0.602608277137394, knee: 0.216233872556586, ankle: -1.78806297203934}
+    lm: {thigh: 0, knee: 1.58276242432458, ankle: -2.45326223827851}
+    lb: {thigh: -0.0946202502181377, knee: 0.430417749537793, ankle: -1.81270039210769}
+    rf: {thigh: 0, knee: 1.58276242432458, ankle: -2.45326223827851}
+    rm: {thigh: -0.0266112713809878, knee: 0.114358838743329, ankle: -1.80114300193392}
+    rb: {thigh: 0, knee: 1.58276242432458, ankle: -2.45326223827851}
+
+  # 备选方式：以下数值与当前启用的初态等价。切换时整块取消注释。
+  # mode: feet
+  # frame: leg  # 每条腿自己的局部坐标系，直接作为解析逆解输入
+  # feet:  # 足端坐标，单位 m；使用上面的 ik_branch 指定分支
+  #   lf: {x: 0.163780943626362, y: -0.112676822149468, z: -0.142108054443638}
+  #   lm: {x: 0.18, y: 0, z: 0.0}
+  #   lb: {x: 0.221007703901584, y: -0.0209744362875057, z: -0.112745692039026}
+  #   rf: {x: 0.18, y: 0, z: 0.0}
+  #   rm: {x: 0.181412855620387, y: -0.00482876663281112, z: -0.154023495258838}
+  #   rb: {x: 0.18, y: 0, z: 0.0}

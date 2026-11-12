@@ -2,6 +2,7 @@
 #define DAMIAO_H
 
 #include <array>
+#include <chrono>
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -124,7 +125,18 @@ struct DmActData
 
 class Motor
 {
+public:
+  struct Feedback
+  {
+    float q{0}, dq{0}, tau{0};
+    bool received{false};
+    std::chrono::steady_clock::time_point received_at{};
+    bool valid(double timeout) const;
+  };
+
 private:
+  mutable std::mutex feedback_mutex_;
+  Feedback feedback_;
   uint16_t Can_id;
   uint16_t Master_id;
   float state_q = 0.0;
@@ -160,9 +172,10 @@ public:
   Limit_param get_limit_param() { return limit_param; }
   uint16_t GetMasterId() const { return this->Master_id; }
   uint16_t GetCanId() const { return this->Can_id; }
-  float Get_Position() const { return this->state_q; }
-  float Get_Velocity() const { return this->state_dq; }
-  float Get_tau() const { return this->state_tau; }
+  Feedback feedback() const;
+  float Get_Position() const { return feedback().q; }
+  float Get_Velocity() const { return feedback().dq; }
+  float Get_tau() const { return feedback().tau; }
   void set_mode(Control_Mode value) { this->mode = value; }
 
   void set_param(int key, float value);

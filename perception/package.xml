@@ -1,0 +1,9 @@
+<?xml version="1.0"?>
+<package format="2">
+<name>perception</name><version>0.1.0</version>
+<description>perception ROS interface contract.</description>
+<maintainer email="val@todo.todo">val</maintainer><license>BSD-3-Clause</license>
+<buildtool_depend>catkin</buildtool_depend>
+<depend>geometry_msgs</depend>
+<depend>sensor_msgs</depend>
+</package>

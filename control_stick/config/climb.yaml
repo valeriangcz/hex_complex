@@ -1,0 +1,13 @@
+joy_topic: /joy
+publish_hz: 20.0
+axes:
+  vx: 0
+  vy: 1
+  wz: 2
+buttons:
+  start: 0  # complex 开始/恢复；climb 不适用
+  pause: 4  # complex 暂停并保留进度
+  reset: 1
+  sim_reset: 3  # 仅调用 hex/sim/reset，恢复仿真物理初态
+  disable_actuators: 6
+  release_magnets: 7

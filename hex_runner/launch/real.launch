@@ -1,0 +1,25 @@
+<launch>
+  <arg name="mode" default="climb"/>
+  <arg name="runner_config" default="$(find hex_runner)/config/$(arg mode).yaml"/>
+  <arg name="data_root" default=""/>
+  <arg name="output_dir" default=""/>
+  <arg name="can_interface" default="can0"/>
+  <arg name="servo_config" default="$(find feetech_servo)/para/servo.yaml"/>
+  <!-- Empty means no provider. Missing sensor feedback keeps runner WAITING. -->
+  <arg name="magnetic_launch" default=""/>
+  <arg name="perception_launch" default=""/>
+  <node pkg="dm_motor_fusion" type="dm_motor_fusion_node" name="dm_motor_fusion_node" output="screen" required="true">
+    <param name="can_interface" value="$(arg can_interface)"/>
+    <param name="control_hz" value="100.0"/><param name="status_hz" value="100.0"/>
+  </node>
+  <node pkg="feetech_servo" type="feetech_servo_interface" name="feetech_servo_interface" output="screen" required="true">
+    <rosparam command="load" file="$(arg servo_config)"/>
+    <remap from="servo_cmd" to="hex/servo/command"/><remap from="servo_state" to="hex/servo/state"/>
+  </node>
+  <include if="$(eval arg('magnetic_launch') != '')" file="$(arg magnetic_launch)"/>
+  <include if="$(eval arg('perception_launch') != '')" file="$(arg perception_launch)"/>
+  <include file="$(find hex_runner)/launch/runner.launch">
+    <arg name="mode" value="$(arg mode)"/><arg name="config" value="$(arg runner_config)"/>
+    <arg name="data_root" value="$(arg data_root)"/><arg name="output_dir" value="$(arg output_dir)"/>
+  </include>
+</launch>

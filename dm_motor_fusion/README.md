@@ -2,21 +2,21 @@
 
 六足机器人（电磁六足）达妙电机统一控制节点。通过单路 SocketCAN（`can0`）驱动 18 台达妙 DM 系列电机（6 条腿 × 3 关节），把原先 6 个控制话题 / 6 个状态话题合并为两个统一话题：
 
-- 订阅 `/sita_des`（`dm_motor_fusion/MultiLegCommand`）— 六腿统一控制指令
-- 发布 `/sita_cur`（`dm_motor_fusion/MultiLegState`）— 六腿统一测量状态
+- 订阅 `/hex/motor/command`（`dm_motor_fusion/MultiLegCommand`）— 六腿统一控制指令
+- 发布 `/hex/motor/state`（`dm_motor_fusion/MultiLegState`）— 六腿统一测量状态
 
 基于 ROS1（catkin），C++ 实现，控制环默认 100 Hz、状态上报默认 100 Hz。提供 Docker 一键部署（见仓库 `docker/README.md`）。
 
 ## 1. 话题接口
 
 ```
-              /sita_des  (MultiLegCommand)
+              /hex/motor/command  (MultiLegCommand)
    上位机 ────────────────────────▶ dm_motor_fusion_node ──CAN──▶ 18×达妙电机
    上位机 ◀──────────────────────── dm_motor_fusion_node ◀──CAN──
-              /sita_cur  (MultiLegState)
+              /hex/motor/state  (MultiLegState)
 ```
 
-### 1.1 控制话题 `/sita_des`
+### 1.1 控制话题 `/hex/motor/command`
 
 `option` 为全局控制模式（六腿共用），每条腿独立给 3 个关节的控制量：
 
@@ -37,18 +37,18 @@
 | 膝关节 knee | `knee_pos` `knee_vel` `knee_tau` `knee_kp` `knee_kd` | `knee_pos` `knee_vel` `knee_tau` |
 | 大腿 thigh | `thigh_pos` `thigh_vel` `thigh_tau` `thigh_kp` `thigh_kd` | `thigh_pos` `thigh_vel` `thigh_tau` |
 
-单位：`pos` rad、`vel` rad/s、`tau` N·m。`LegState` 为电机 CAN 反馈（含 pn 方向系数），没有 kp/kd 字段；`/sita_cur.option` 报告当前生效模式（初始 `-1`）。
+单位：`pos` rad、`vel` rad/s、`tau` N·m。`LegState` 为电机 CAN 反馈（含 pn 方向系数），没有 kp/kd 字段；`/hex/motor/state.option` 报告当前生效模式（初始 `-1`）。
 
 ### 1.3 腿-电机 CAN ID 映射
 
 | 腿 | 字段名 | 脚踝 | 膝关节 | 大腿 | pn 方向系数（脚踝/膝/大腿） |
 | --- | --- | --- | --- | --- | --- |
-| 左前 LF | `left_front` | 1 | 2 | 3 | +1 / +1 / −1 |
-| 左中 LM | `left_mid` | 4 | 5 | 6 | +1 / +1 / −1 |
-| 左后 LB | `left_back` | 7 | 8 | 9 | +1 / +1 / −1 |
-| 右前 RF | `right_front` | 10 | 11 | 12 | +1 / −1 / +1 |
-| 右中 RM | `right_mid` | 13 | 14 | 15 | +1 / −1 / +1 |
-| 右后 RB | `right_back` | 16 | 17 | 18 | +1 / −1 / +1 |
+| 左前 lf | `lf` | 1 | 2 | 3 | +1 / +1 / −1 |
+| 左中 lm | `lm` | 4 | 5 | 6 | +1 / +1 / −1 |
+| 左后 lb | `lb` | 7 | 8 | 9 | +1 / +1 / −1 |
+| 右前 rf | `rf` | 10 | 11 | 12 | +1 / −1 / +1 |
+| 右中 rm | `rm` | 13 | 14 | 15 | +1 / −1 / +1 |
+| 右后 rb | `rb` | 16 | 17 | 18 | +1 / −1 / +1 |
 
 - CAN ID = 电机 ESC ID（1~18），反馈 CAN ID（master ID）= 0x21~0x32
 - 位置指令按 pn 系数取符号后下发电机；状态反馈同样乘 pn 还原到机体坐标
@@ -73,7 +73,7 @@
 | `status_hz` | `100.0` | 状态发布频率 |
 | `thread_priority` | `95` | CAN 接收线程优先级（预留） |
 
-行为说明：CAN 接口不存在时节点不退出，每秒重试直到接口就绪；启动时对 18 台电机发送模式切换（MIT）与失能指令，收到 `/sita_des` 后按 `option` 使能。
+行为说明：CAN 接口不存在时节点不退出，每秒重试直到接口就绪；启动时对 18 台电机发送模式切换（MIT）与失能指令，收到 `/hex/motor/command` 后按 `option` 使能。
 
 ## 4. 使用
 
@@ -104,14 +104,14 @@ rosrun dm_motor_fusion multi_motor_sin90.py _option:=2 _amplitude_deg:=90
 ### 4.4 命令行发布示例（站立姿态，MIT）
 
 ```bash
-rostopic pub -r 10 /sita_des dm_motor_fusion/MultiLegCommand "{
+rostopic pub -r 10 /hex/motor/command dm_motor_fusion/MultiLegCommand "{
 option: 1,
-left_front:  {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
-left_mid:    {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
-left_back:   {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
-right_front: {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
-right_mid:   {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
-right_back:  {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0}
+lf:  {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
+lm:    {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
+lb:   {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
+rf: {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
+rm:   {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0},
+rb:  {ankle_pos: -0.8, ankle_vel: 0.0, ankle_tau: 0.0, ankle_kp: 100.0, ankle_kd: 1.0, knee_pos: 1.6, knee_vel: 0.0, knee_tau: 0.0, knee_kp: 100.0, knee_kd: 1.0, thigh_pos: -0.8, thigh_vel: 0.0, thigh_tau: 0.0, thigh_kp: 100.0, thigh_kd: 1.0}
 }"
 ```
 
@@ -143,3 +143,15 @@ dm_motor_fusion/
 - ⚠️ 该节点会向真实电机发送使能与力矩/位置指令，联调时先小 kp、低位姿验证电机方向（尤其右侧三腿膝部 pn=−1），确认无误后再放大幅值。
 - 消息中的 `kp/kd` 会直接下发到电机 MIT 模式寄存器，`option=1` 时请确保已给合理值（0 会使电机软掉）。
 - `option=2` 目前节点内部仍按 MIT 模式发送（`switchMotorMode` 固定 MIT），等效于"用消息里的 kp/kd 做位置跟踪"。
+
+
+## hex_runner 公共接口
+
+节点直接使用相对话题 hex/motor/command、hex/motor/state，支持命名空间与 remap，无需组合启动适配。
+MultiLegState 新增 Header 和 bool[18] valid，消息 MD5 已变，订阅端需重新编译。
+valid 顺序为 lf/lm/lb/rf/rm/rb，每腿 ankle/knee/thigh；未收到真实 CAN 状态或
+超过 feedback_timeout（默认0.5秒）时无效，不将默认零值视为有效位置。
+禁用状态会请求位置反馈，以支持 runner reset 前的状态就绪检查。
+CAN 初始化不自动使能；使能由显式指令控制。
+位置、速度和前馈力矩均按每关节方向因子转换，反馈使用同一逻辑方向。
+runner 当前使用 option=1 MIT；模拟后端仅支持 -1/0/1，不支持位置速度模式。

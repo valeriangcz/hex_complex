@@ -1,0 +1,78 @@
+# 电机 控制模式：
+#   -1 失能 disable
+#    0 零力矩 zero torque
+#    1 MIT 模式（position/vel/tau + kp/kd 全参数控制）
+#    2 位置速度模式（使用 position/vel，忽略 tau/kp/kd）
+
+workspace_root: ../../..
+expert_type: climb
+pose_source: imu
+control_dt: 0.01
+servo_hz: 30.0
+magnetic_hz: 30.0
+feedback_timeout: 0.5
+motor_kp: 100.0
+motor_kd: 1.0
+motor_torque_limit: 27.0
+robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
+expert_parameters:
+  contact_force_threshold: 7.0
+  contact_confirm_steps: 10
+  contact_velocity_threshold: 0.03  # m/s，连续受压且法向运动接近停止才确认落地
+  torque_blend_time: 0.1
+  stance_height: 0.08
+velocity_scales:
+  vx: 0.3
+  vy: 0.4
+  wz: 0.5
+initial_state:
+  pose:
+    position:
+      x: 0.0
+      y: 0.0
+      z: 0.113
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      w: 1.0
+  stance_group: 0
+  ik_branch:
+    lf: 1
+    lm: 1
+    lb: 1
+    rf: 1
+    rm: 1
+    rb: 1
+  magnetic:
+    lf: true
+    lm: true
+    lb: true
+    rf: true
+    rm: true
+    rb: true
+  motor_mode: 1
+  servo_enabled: true
+  # 下面两种初始化方式只能启用一种；切换时将另一种整块注释（含 mode）。
+  # 共同字段 pose、stance_group、ik_branch、magnetic 和使能配置保留。
+  # ik_branch: 0 为 ankle 非负分支，1 为 ankle 负分支；joints 模式须与 ankle 符号一致。
+  # foot 不手填：climb=-knee-ankle-pi/2；complex 的 swing 为0，stance 按专家法向计算。
+  mode: feet
+  frame: leg  # 每条腿自己的局部坐标系，直接作为解析逆解输入
+  feet:  # 足端坐标，单位 m；使用上面的 ik_branch 指定分支
+    lf: {x: 0.18, y: -0.08, z: -0.08}
+    lm: {x: 0.19, y: 0, z: -0.08}
+    lb: {x: 0.18, y: 0.08, z: -0.08}
+    rf: {x: 0.18, y: 0.08, z: -0.08}
+    rm: {x: 0.19, y: 0, z: -0.08}
+    rb: {x: 0.18, y: -0.08, z: -0.08}
+
+  # 备选方式：以下数值与当前启用的初态等价。切换时整块取消注释。
+  # mode: joints
+  # q:  # 电机关节角，单位 rad；按名称显式填写
+  #   lf: {thigh: -0.418224329579229, knee: 0.738694824988388, ankle: -2.13888880529807}
+  #   lm: {thigh: 0, knee: 0.74850876738884, ankle: -2.18508831256146}
+  #   lb: {thigh: 0.418224329579229, knee: 0.738694824988388, ankle: -2.13888880529807}
+  #   rf: {thigh: 0.418224329579229, knee: 0.738694824988388, ankle: -2.13888880529807}
+  #   rm: {thigh: 0, knee: 0.74850876738884, ankle: -2.18508831256146}
+  #   rb: {thigh: -0.418224329579229, knee: 0.738694824988388, ankle: -2.13888880529807}

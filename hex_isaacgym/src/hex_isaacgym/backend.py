@@ -1,4 +1,4 @@
-"""Single-environment Isaac Gym backend for ExpertComplex."""
+"""Single-environment Isaac Gym backend for ROS device control."""
 
 from pathlib import Path
 
@@ -11,7 +11,7 @@ from hex_kinematic.se3_utils import transform_from_xyzw, transform_to_xyzw
 from .actuation import update_adhesion_forces
 from .config import BackendConfig
 from .loader import load_isaacgym
-from .types import ExpertCommand, InitialState, RobotState
+from .types import ActuatorCommand, InitialState, RobotState
 
 
 class IsaacGymBackend:
@@ -226,7 +226,7 @@ class IsaacGymBackend:
 
     def _dof_indices(self, joint_parts):
         names = [
-            "j_{}_{}".format(leg.lower(), joint)
+            "j_{}_{}".format(leg, joint)
             for leg in LEG_NAMES
             for joint in joint_parts
         ]
@@ -237,7 +237,7 @@ class IsaacGymBackend:
 
     def _body_indices(self, body_parts):
         names = [
-            ["l_{}_{}".format(leg.lower(), part) for part in body_parts]
+            ["l_{}_{}".format(leg, part) for part in body_parts]
             for leg in LEG_NAMES
         ]
         missing = [name for leg_names in names for name in leg_names if name not in self.body_names]
@@ -380,10 +380,13 @@ class IsaacGymBackend:
             .detach().cpu().numpy().copy()
         )
 
-    def reset(self, initial_state):
+    def reset(self, initial_state, adhesion_init=None):
         self._require_open()
         if not isinstance(initial_state, InitialState):
             initial_state = InitialState(**initial_state)
+        adhesion_init = np.zeros(6, dtype=bool) if adhesion_init is None else np.asarray(adhesion_init)
+        if adhesion_init.shape != (6,) or adhesion_init.dtype != np.bool_:
+            raise ValueError("adhesion_init must be a boolean array with shape (6,)")
         position, quaternion = transform_to_xyzw(initial_state.W_T_R)
         root = self.root_states[0]
         root.zero_()
@@ -406,7 +409,11 @@ class IsaacGymBackend:
         self.q_des_full.zero_()
         self.q_des_full[self.command_indices] = dof[self.command_indices, 0]
         self.last_torques.zero_()
+        self.contact_forces.zero_()
         self.rb_forces.zero_()
+        initial_z = np.repeat(-adhesion_init.astype(float)[:, None] * self.config.suction_force_max / 3., 3, axis=1)
+        self.rb_forces[0, self.magnetic_indices.reshape(-1), 2] = self.torch.as_tensor(
+            initial_z.reshape(-1), dtype=self.rb_forces.dtype, device=self.device)
         self.previous_contacts[:] = False
         self._run_elapsed = 0.0
         # GPU setters are applied by the next simulate(). Refreshing here can
@@ -418,8 +425,8 @@ class IsaacGymBackend:
         self._require_open()
         if self._last_state is None:
             raise RuntimeError("reset(initial_state) must be called before step")
-        if not isinstance(command, ExpertCommand):
-            command = ExpertCommand(**command)
+        if not isinstance(command, ActuatorCommand):
+            command = ActuatorCommand(**command)
         torch = self.torch
         self.q_des_full.zero_()
         self.q_des_full[self.command_indices] = torch.as_tensor(
@@ -450,11 +457,22 @@ class IsaacGymBackend:
             command.tau_ff.reshape(-1), dtype=torch.float32, device=self.device
         )
 
+        motor_kp = torch.as_tensor(command.motor_kp.reshape(-1), dtype=torch.float32, device=self.device)
+        motor_kd = torch.as_tensor(command.motor_kd.reshape(-1), dtype=torch.float32, device=self.device)
+        motor_velocity = torch.as_tensor(command.motor_velocity.reshape(-1), dtype=torch.float32, device=self.device)
+        servo_indices = self.command_indices.view(6, 4)[:, 3]
         for _ in range(self.config.decimation):
             q = self.dof_states[0, :, 0]
             q_dot = self.dof_states[0, :, 1]
             torque = self.kp * (self.q_des_full - q) - self.kd * q_dot
-            torque[self.motor_indices] += tau_ff
+            if command.motor_mode == 1:
+                motor_q = q[self.motor_indices]
+                motor_dq = q_dot[self.motor_indices]
+                torque[self.motor_indices] = motor_kp * (self.q_des_full[self.motor_indices] - motor_q) + motor_kd * (motor_velocity - motor_dq) + tau_ff
+            else:
+                torque[self.motor_indices] = 0.0
+            disabled_servos = torch.as_tensor(~command.servo_enabled, dtype=torch.bool, device=self.device)
+            torque[servo_indices[disabled_servos]] = 0.0
             torque = torch.clamp(torque, -self.torque_limits, self.torque_limits)
             self.last_torques.copy_(torque)
             self.gym.set_dof_actuation_force_tensor(
@@ -499,6 +517,8 @@ class IsaacGymBackend:
             q_torque=q_torque,
             adhesion_force=adhesion_force,
             contact_forces=contact,
+            linear_velocity=root[7:10],
+            angular_velocity=root[10:13],
         )
 
     def get_state(self):

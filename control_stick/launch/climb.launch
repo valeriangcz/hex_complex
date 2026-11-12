@@ -1,0 +1,10 @@
+<launch>
+  <arg name="config" default="$(find control_stick)/config/climb.yaml"/>
+  <node pkg="control_stick" type="climb_joy_node.py" name="climb_joy" clear_params="true" output="screen" required="true">
+    <rosparam command="load" file="$(arg config)"/>
+  </node>
+  <arg name="start_joy" default="true"/>
+  <node if="$(arg start_joy)" pkg="joy" type="joy_node" name="joy_node" output="screen" required="true">
+    <param name="dev" value="/dev/input/js0"/>
+  </node>
+</launch>

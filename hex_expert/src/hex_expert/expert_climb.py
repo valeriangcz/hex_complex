@@ -1,8 +1,9 @@
 """Single-environment NumPy velocity climbing expert.
 
 Gait equations follow hex_lab.controllers.expert_climb.ExpertClimb. Contact
-detection follows ExpertComplex: CF_Estimate returns foot-on-surface forces,
-so pressure along a landing normal has a negative sign. No simulator is owned.
+uses CF_Estimate foot-on-surface forces, so pressure has a negative normal
+component. Measured motion and consecutive samples reject swing loads.
+No simulator is owned.
 """
 
 import math
@@ -14,7 +15,7 @@ from hex_kinematic import Kinematic, LEG_NAMES
 
 
 class ExpertClimb:
-    """Velocity-command climbing in LB/LF/LM/RB/RF/RM order.
+    """Velocity-command climbing in lb/lf/lm/rb/rf/rm order.
 
     ``kinematic`` must have a URDF mass model. Joint arrays are (6,4), motor
     torques (6,3), and commands are body-frame (vx, vy, yaw_rate). Geometry and
@@ -23,18 +24,19 @@ class ExpertClimb:
 
     def __init__(
         self, kinematic, *, control_dt=0.01, motor_torque_limits=27.0,
-        adhesion_force_limit=300.0, contact_force_threshold=7.0,
-        contact_confirm_steps=10, torque_blend_time=0.1, stance_height=0.08,
-        joint_position_gain=45.0, adhesion_attach_ratio=0.85,
-        adhesion_release_ratio=0.05,
+        contact_force_threshold=7.0,
+        contact_confirm_steps=10, contact_velocity_threshold=0.03,
+        torque_blend_time=0.1, stance_height=0.08,
+        joint_position_gain=45.0,
     ):
         if not isinstance(kinematic, Kinematic):
             raise TypeError("kinematic must be hex_kinematic.Kinematic")
         if not hasattr(kinematic, "total_mass"):
             raise ValueError("kinematic requires a URDF mass model (urdf_path)")
         for name, value in (
-            ("control_dt", control_dt), ("adhesion_force_limit", adhesion_force_limit),
+            ("control_dt", control_dt),
             ("contact_force_threshold", contact_force_threshold),
+            ("contact_velocity_threshold", contact_velocity_threshold),
             ("torque_blend_time", torque_blend_time), ("stance_height", stance_height),
             ("joint_position_gain", joint_position_gain),
         ):
@@ -44,8 +46,6 @@ class ExpertClimb:
                 or not isinstance(contact_confirm_steps, (int, np.integer))
                 or contact_confirm_steps < 1):
             raise ValueError("contact_confirm_steps must be a positive integer")
-        if not 0.0 < adhesion_release_ratio < adhesion_attach_ratio < 1.0:
-            raise ValueError("adhesion ratios must satisfy 0 < release < attach < 1")
         limits = np.asarray(motor_torque_limits, dtype=np.float64)
         if limits.ndim == 0:
             limits = np.full((6, 3), limits.item())
@@ -56,13 +56,11 @@ class ExpertClimb:
         self.leg_names = list(LEG_NAMES)
         self.dt = float(control_dt)
         self.motor_torque_limits = limits.copy()
-        self.max_adhesions_force = float(adhesion_force_limit)
         self.contact_force_threshold = float(contact_force_threshold)
         self.contact_confirm_steps = int(contact_confirm_steps)
+        self.contact_velocity_threshold = float(contact_velocity_threshold)
         self.stance_height = float(stance_height)
         self.joint_position_gain = float(joint_position_gain)
-        self.adhesion_attach_ratio = float(adhesion_attach_ratio)
-        self.adhesion_release_ratio = float(adhesion_release_ratio)
         self.torque_blend_steps = max(1, round(torque_blend_time / self.dt))
         self.total_mass = float(kinematic.total_mass)
         self.world_gravity = np.array([0.0, 0.0, -9.81])
@@ -103,6 +101,8 @@ class ExpertClimb:
         self.B_landing_n[2] = 1.0
         self.B_support_n = self.B_landing_n.copy()
         self.estimated_contact_force = np.zeros(6)
+        self.normal_foot_velocity = np.zeros(6)
+        self._previous_contact_feet = None
         self.tau_ff = np.zeros((6, 3))
         self.static_contact_forces_R = np.zeros((6, 3))
         self._feedforward_support_mask = np.zeros(6, dtype=bool)
@@ -117,6 +117,7 @@ class ExpertClimb:
         self.q_des[:] = q_init
         self.kin.ForwardKin(q_init[:, :3], self._foot_target_leg)
         self.B_e_cur[:] = self._foot_target_leg.T
+        self._previous_contact_feet = self._foot_target_leg.copy()
         self.gaits[self.groups[0]] = True
         self.adhesions[:] = self.gaits
         self.set_init = True
@@ -126,14 +127,15 @@ class ExpertClimb:
         self.Reset(q_init)
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy()
 
-    def RequestSingleStep(self, cur_se3, q_cur, q_torque, adhesion_force, command):
+    def RequestSingleStep(self, cur_se3, q_cur, q_torque, attached, command):
         """Advance one control period without modifying inputs.
 
         cur_se3: body pose in world W_T_R as spatialmath.SE3.
         q_cur: (6,4) drive angles; q_torque: (6,3) measured motor torques.
-        adhesion_force: (6,) per-foot magnetic force magnitudes in N.
+        attached: (6,) measured per-foot attachment booleans.
         command: (3,) body vx/vy in m/s and yaw rate in rad/s.
-        Returns independent q_des (6,4), tau_ff (6,3), adhesions (6,) arrays.
+        Returns q_des (6,4), tau_ff (6,3), adhesions (6,), servo_enabled (6,).
+        Stance servos are passive; swing servos track their target angles.
         """
         if not isinstance(cur_se3, SE3) or len(cur_se3) != 1:
             raise TypeError("cur_se3 must be a single spatialmath.SE3 pose")
@@ -141,45 +143,69 @@ class ExpertClimb:
             raise ValueError("cur_se3 must be finite")
         q_cur = self._array(q_cur, (6, 4), "q_cur")
         q_torque = self._array(q_torque, (6, 3), "q_torque")
-        adhesion_force = self._array(adhesion_force, (6,), "adhesion_force")
+        attached = np.asarray(attached)
+        if attached.shape != (6,) or attached.dtype != np.bool_:
+            raise ValueError("attached must be a boolean array with shape (6,)")
         command = self._array(command, (3,), "command")
         if not self.set_init:
             self._initialize(q_cur)
         self.kin.ForwardKin(q_cur[:, :3], self.B_e_cur.T)
         if np.any(command):
-            self._PlanGait(command, q_cur[:, :3], q_torque, adhesion_force)
+            self._PlanGait(command, q_cur[:, :3], q_torque, attached)
             delta = self._foot_target_leg - self.B_e_cur.T
             dq = np.einsum("nij,nj->ni", self.kin.DampInvJac(q_cur[:, :3]), delta)
             self.q_des[:, :3] = q_cur[:, :3] + self.joint_position_gain * dq * self.dt
+            self.q_des[:, 0] = np.clip(self.q_des[:, 0],
+                self.kin.joints_limits_thigh[:, 0], self.kin.joints_limits_thigh[:, 1])
+            self.q_des[:, 1:3] = np.clip(self.q_des[:, 1:3],
+                self.kin.joints_limits_rest[None, :, 0], self.kin.joints_limits_rest[None, :, 1])
             self.q_des[:, 3] = -self.q_des[:, 1] - self.q_des[:, 2] - np.pi / 2.0
         else:
             self.contact_count.fill(0)
         com = self.kin.ForwardKinAll(q_cur)["R_com"]
         self._ComputeQuasiStaticTauFF(cur_se3, q_cur[:, :3], com)
         self.compute_count += 1
-        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy()
+        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     def _ContactDetection(self, q_cur, q_torque):
-        """Accumulate pressure detections as in ExpertComplex._ContactDetection.
+        """Confirm sustained pressure on a foot whose normal motion has stopped.
 
-        A climb swing has no indexed trajectory. Its completed lift/return
-        phase replaces ExpertComplex's trajectory-progress gate. Non-contact
-        samples do not clear counts, matching ExpertComplex's accumulation.
+        Motor torque also contains swing acceleration/tracking effort. A pressure
+        threshold alone can mark an airborne descending foot as stance, stop its
+        descent and disable its servo before the magnet ever touches the surface.
         """
         force = self.kin.CF_Estimate(q_torque, q_cur)
         self.estimated_contact_force[:] = np.sum(force * self.B_landing_n.T, axis=1)
+        feet = np.empty((6, 3))
+        self.kin.ForwardKin(q_cur, feet)
+        if self._previous_contact_feet is None:
+            self.normal_foot_velocity.fill(np.inf)
+        else:
+            velocity = (feet - self._previous_contact_feet) / self.dt
+            self.normal_foot_velocity[:] = np.sum(velocity * self.B_landing_n.T, axis=1)
+        self._previous_contact_feet = feet.copy()
         contact = ((self.estimated_contact_force <= -self.contact_force_threshold)
+                   & (np.abs(self.normal_foot_velocity) <= self.contact_velocity_threshold)
                    & ~self.gaits & self._swing_reached)
+        # Scattered dynamic-load spikes must not accumulate into a false landing.
+        self.contact_count[~contact] = 0
         self.contact_count[contact] += 1
         detected = self.contact_count >= self.contact_confirm_steps
         self.contact_count[detected] = 0
         self.B_support_n[:, detected] = self.B_landing_n[:, detected]
         return detected
 
-    def _PlanGait(self, command, q_cur, q_torque, adhesion_force):
-        self.gaits[self._ContactDetection(q_cur, q_torque)] = True
+    def _PlanGait(self, command, q_cur, q_torque, attached):
+        landed = self._ContactDetection(q_cur, q_torque)
+        # Start stance from the measured touchdown, not the deeper press target.
+        self._foot_target_leg[landed] = self.B_e_cur.T[landed]
+        self.gaits[landed] = True
         self.adhesions[:] = self.gaits
         next_targets = self._ComputeFootTargets(command)
+        # A confirmed magnet may already hold a touchdown foot while pressure is
+        # still being confirmed. Do not drag that foot relative to the body.
+        settling = attached & self._swing_reached & ~self.gaits
+        next_targets[settling, :2] = self.B_e_cur.T[settling, :2]
         workspace = self._CheckWorkspace(next_targets)
         clearance = self._CheckLegClearance(next_targets)
         self.adhesions[self._swing_reached] = True
@@ -188,13 +214,15 @@ class ExpertClimb:
         set_z = swing & (~clearance | ~workspace)
         self._foot_target_leg[set_z, 2] = next_targets[set_z, 2]
         self._foot_target_leg[set_all] = next_targets[set_all]
+        # A horizontal workspace/clearance limit may stop body translation, but
+        # must not freeze height recovery after a deep touchdown.
+        self._foot_target_leg[self.gaits, 2] = next_targets[self.gaits, 2]
         if np.all(swing | (workspace & clearance)):
-            self._foot_target_leg[self.gaits] = next_targets[self.gaits]
+            self._foot_target_leg[self.gaits, :2] = next_targets[self.gaits, :2]
 
         new_group = self.groups[1 - self.stance_group_index]
         old_group = self.groups[self.stance_group_index]
-        attached = adhesion_force > self.max_adhesions_force * self.adhesion_attach_ratio
-        released = adhesion_force < self.max_adhesions_force * self.adhesion_release_ratio
+        released = ~attached
         if np.all((attached & self.gaits)[new_group]):
             self.adhesions[old_group] = False
             if np.all(released[old_group]):
@@ -223,10 +251,13 @@ class ExpertClimb:
             next_R[mask] = feet_R[mask] @ transform[:3, :3].T + transform[:3, 3]
         next_leg = self.kin._R2B(next_R.T, indices).T
         feet = self._foot_target_leg
-        self._swing_reached |= feet[:, 2] >= self._swing_start_leg[0, 2] - 0.005
+        # A reached target is not proof that the measured foot has lifted.
+        self._swing_reached |= self.B_e_cur[2] >= self._swing_start_leg[:, 2] - 0.005
         returning = ~self._swing_reached & ~self.gaits
         speed_z = min(1.2, max(np.linalg.norm(command[:2]) * 1.5, abs(command[2]) * 1.2))
-        speed_z = speed_z * np.clip((feet_R[:, 2] + 0.16) / 0.12, 0.0, 1.0)
+        # Keep a nonzero approach rate: the old zero lower bound trapped
+        # the target at z=-0.16 even when the measured foot was still airborne.
+        speed_z = speed_z * np.clip((feet_R[:, 2] + 0.16) / 0.12, 0.1, 1.0)
         stance_z_error = feet[:, 2] + self.stance_height
         increment = self.dt * speed_z * 0.2
         direct = self.gaits & (np.abs(stance_z_error) < increment)
@@ -237,10 +268,19 @@ class ExpertClimb:
         delta = self._swing_start_leg - feet
         distance = np.linalg.norm(delta, axis=1, keepdims=True)
         direction = np.divide(delta, distance, out=np.zeros_like(delta), where=distance > 0.0)
-        return_target = feet + direction * self.dt * speed_z[:, None]
+        return_target = feet + direction * np.minimum(self.dt * speed_z[:, None], distance)
         next_leg[returning] = return_target[returning]
         descending = ~self.gaits & self._swing_reached
-        next_leg[descending, 2] -= speed_z[descending] * self.dt
+        # Return to the lift waypoint, then descend there. Advancing xy for the
+        # entire descent overshoots the lateral workspace at large vy.
+        next_leg[descending, :2] = feet[descending, :2]
+        next_leg[descending, 2] = np.maximum(
+            next_leg[descending, 2] - speed_z[descending] * self.dt, -0.2)
+        # for i in range(6):
+        #     if not self.gaits[i]:
+        #         print(f"{i} next_B{next_leg[i]} cur_B{self.B_e_cur[:,i].T}")
+        # print("\n")
+
         return next_leg
 
     @staticmethod

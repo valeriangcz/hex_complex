@@ -1,0 +1,10 @@
+<launch>
+  <arg name="initial_config"/>
+  <arg name="config" default="$(find hex_isaacgym)/config/plane.yaml"/>
+  <arg name="device" default=""/>
+  <arg name="headless" default="false"/>
+  <arg name="publish_clock" default="false"/>
+  <param if="$(arg publish_clock)" name="/use_sim_time" value="true"/>
+  <node pkg="hex_isaacgym" type="sim_node.py" name="hex_sim" output="screen" required="true"
+        args="--config '$(arg config)' --initial-config '$(arg initial_config)' --device '$(arg device)' --headless $(arg headless) --publish-clock $(arg publish_clock)"/>
+</launch>

@@ -30,19 +30,36 @@ def _transform_matrix(value, name="W_T_R"):
     return matrix
 
 
-@dataclass(frozen=True)
-class ExpertCommand:
-    """One expert control-period command in expert leg order."""
+@dataclass
+class ActuatorCommand:
+    """Mutable device commands in named kinematic order."""
 
     q_des: np.ndarray
     tau_ff: np.ndarray
     adhesions: np.ndarray
+    motor_mode: int = 1
+    servo_enabled: np.ndarray = None
+    motor_velocity: np.ndarray = None
+    motor_kp: np.ndarray = None
+    motor_kd: np.ndarray = None
 
     def __post_init__(self):
-        object.__setattr__(self, "q_des", _finite_array(self.q_des, (6, 4), "q_des"))
-        object.__setattr__(self, "tau_ff", _finite_array(self.tau_ff, (6, 3), "tau_ff"))
+        self.q_des = _finite_array(self.q_des, (6, 4), "q_des")
+        self.tau_ff = _finite_array(self.tau_ff, (6, 3), "tau_ff")
+        if self.motor_mode not in (-1, 0, 1):
+            raise ValueError("motor mode must be disable, zero torque or MIT")
+        enabled = np.ones(6, dtype=bool) if self.servo_enabled is None else np.asarray(self.servo_enabled)
+        if enabled.shape != (6,) or enabled.dtype != np.bool_:
+            raise ValueError("servo_enabled must be a boolean array with shape (6,)")
+        self.servo_enabled = enabled.copy()
+        for name, default in (("motor_velocity", 0.), ("motor_kp", 60.), ("motor_kd", 1.)):
+            value = getattr(self, name)
+            value = np.full((6, 3), default) if value is None else _finite_array(value, (6, 3), name)
+            if name != "motor_velocity" and (value < 0).any():
+                raise ValueError("motor gains must be nonnegative")
+            setattr(self, name, value)
         adhesions = _finite_array(self.adhesions, (6,), "adhesions")
-        object.__setattr__(self, "adhesions", adhesions.astype(bool))
+        self.adhesions = adhesions.astype(bool)
 
 
 @dataclass(frozen=True)
@@ -72,8 +89,13 @@ class RobotState:
     q_torque: np.ndarray
     adhesion_force: np.ndarray
     contact_forces: np.ndarray
+    linear_velocity: np.ndarray = None
+    angular_velocity: np.ndarray = None
 
     def __post_init__(self):
+        for name in ("linear_velocity", "angular_velocity"):
+            value = getattr(self, name)
+            object.__setattr__(self, name, np.zeros(3) if value is None else _finite_array(value, (3,), name))
         if not np.isfinite(self.sim_time) or not np.isfinite(self.run_elapsed):
             raise ValueError("sim_time and run_elapsed must be finite")
         object.__setattr__(self, "W_T_R", _transform_matrix(self.W_T_R))

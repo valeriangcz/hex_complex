@@ -1,0 +1,19 @@
+# All six-element arrays use this order: lf, lm, lb, rf, rm, rb.
+port: /dev/ttyUSB0
+baud_rate: 115200
+ids: [1, 2, 3, 4, 5, 6]
+
+# Absolute servo angle when the corresponding command is 0 degrees.
+# Replace with measured installation offsets before controlling the mechanism.
+offset_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+direction: [1, 1, 1, 1, 1, 1]
+
+# Initial conversion convention; calibrate against the actual servo variant.
+angle_span_deg: 300.0
+raw_max: 1023
+move_time_ms: 1000
+speed: 0
+read_timeout_ms: 20
+
+# Poll feedback even before receiving commands; 0 selects command-only feedback.
+state_hz: 20.0

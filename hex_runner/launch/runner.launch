@@ -1,0 +1,8 @@
+<launch>
+  <arg name="mode" default="climb"/>
+  <arg name="config" default="$(find hex_runner)/config/$(arg mode).yaml"/>
+  <arg name="data_root" default=""/>
+  <arg name="output_dir" default=""/>
+  <node pkg="hex_runner" type="runner_node.py" name="hex_runner" output="screen" required="true"
+        args="--config '$(arg config)' --data-root '$(arg data_root)' --output-dir '$(arg output_dir)'"/>
+</launch>

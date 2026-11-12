@@ -3,6 +3,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <array>
 #include <unordered_map>
 #include <vector>
@@ -57,7 +58,7 @@ int toControlModeCode(const int mode)
 }
 
 // 关节顺序与消息字段对应：0=脚踝(ankle), 1=膝关节(knee), 2=大腿(thigh)
-// 即组内 CAN ID 从小到大：如 LF 腿 1/2/3 = 脚踝/膝/大腿
+// 即组内 CAN ID 从小到大：如 lf 腿 1/2/3 = 脚踝/膝/大腿
 double jointPos(const dm_motor_fusion::LegCommand& leg, std::size_t joint)
 {
   switch (joint)
@@ -128,17 +129,17 @@ const dm_motor_fusion::LegCommand& legCommandOf(const dm_motor_fusion::MultiLegC
   switch (group_idx)
   {
     case 0:
-      return msg.left_front;
+      return msg.lf;
     case 1:
-      return msg.left_mid;
+      return msg.lm;
     case 2:
-      return msg.left_back;
+      return msg.lb;
     case 3:
-      return msg.right_front;
+      return msg.rf;
     case 4:
-      return msg.right_mid;
+      return msg.rm;
     default:
-      return msg.right_back;
+      return msg.rb;
   }
 }
 
@@ -147,17 +148,17 @@ dm_motor_fusion::LegState& legStateOf(dm_motor_fusion::MultiLegState& msg, std::
   switch (group_idx)
   {
     case 0:
-      return msg.left_front;
+      return msg.lf;
     case 1:
-      return msg.left_mid;
+      return msg.lm;
     case 2:
-      return msg.left_back;
+      return msg.lb;
     case 3:
-      return msg.right_front;
+      return msg.rf;
     case 4:
-      return msg.right_mid;
+      return msg.rm;
     default:
-      return msg.right_back;
+      return msg.rb;
   }
 }
 
@@ -193,12 +194,15 @@ public:
     pnh_.param<int>("thread_priority", thread_priority_, 95);
     pnh_.param<double>("control_hz", control_hz_, 100.0);
     pnh_.param<double>("status_hz", status_hz_, 100.0);
+    pnh_.param<double>("feedback_timeout", feedback_timeout_, 0.5);
+    if (!std::isfinite(feedback_timeout_) || feedback_timeout_ <= 0.0)
+      throw std::runtime_error("feedback_timeout must be positive and finite");
     pnh_.param<int>("motor_type", motor_type_, static_cast<int>(damiao::DM4340));
 
     initMotors();
 
-    cmd_sub_ = nh_.subscribe("/sita_des", 20, &DmMotorFusionNode::commandCallback, this);
-    state_pub_ = nh_.advertise<dm_motor_fusion::MultiLegState>("/sita_cur", 20);
+    cmd_sub_ = nh_.subscribe("hex/motor/command", 20, &DmMotorFusionNode::commandCallback, this);
+    state_pub_ = nh_.advertise<dm_motor_fusion::MultiLegState>("hex/motor/state", 20);
 
     control_timer_ = nh_.createTimer(ros::Duration(1.0 / control_hz_), &DmMotorFusionNode::controlLoop, this);
     status_timer_ = nh_.createTimer(ros::Duration(1.0 / status_hz_), &DmMotorFusionNode::publishStatus, this);
@@ -251,15 +255,16 @@ private:
 
     // 组内 ID 从小到大依次为：脚踝, 膝关节, 大腿
     groups_ = {
-        LegGroup{"LF", {1, 2, 3}, {1.0, 1.0, -1.0}},
-        LegGroup{"LM", {4, 5, 6}, {1.0, 1.0, -1.0}},
-        LegGroup{"LB", {7, 8, 9}, {1.0, 1.0, -1.0}},
-        LegGroup{"RF", {10, 11, 12}, {1.0, -1.0, 1.0}},
-        LegGroup{"RM", {13, 14, 15}, {1.0, -1.0, 1.0}},
-        LegGroup{"RB", {16, 17, 18}, {1.0, -1.0, 1.0}},
+        LegGroup{"lf", {1, 2, 3}, {1.0, 1.0, -1.0}},
+        LegGroup{"lm", {4, 5, 6}, {1.0, 1.0, -1.0}},
+        LegGroup{"lb", {7, 8, 9}, {1.0, 1.0, -1.0}},
+        LegGroup{"rf", {10, 11, 12}, {1.0, -1.0, 1.0}},
+        LegGroup{"rm", {13, 14, 15}, {1.0, -1.0, 1.0}},
+        LegGroup{"rb", {16, 17, 18}, {1.0, -1.0, 1.0}},
     };
 
-    ROS_INFO("dm_motor_fusion ready on %s: cmd /sita_des, state /sita_cur, 18 motors", can_interface_.c_str());
+    ROS_INFO("dm_motor_fusion ready on %s: cmd %s, state %s, 18 motors", can_interface_.c_str(),
+             nh_.resolveName("hex/motor/command").c_str(), nh_.resolveName("hex/motor/state").c_str());
   }
 
   void commandCallback(const dm_motor_fusion::MultiLegCommand::ConstPtr& msg)
@@ -285,8 +290,8 @@ private:
           continue;
         }
         motor.cmd_pos = jointPos(leg, j) * groups_[g].pn[j];
-        motor.cmd_vel = jointVel(leg, j);
-        motor.cmd_tau = jointTau(leg, j);
+        motor.cmd_vel = jointVel(leg, j) * groups_[g].pn[j];
+        motor.cmd_tau = jointTau(leg, j) * groups_[g].pn[j];
         motor.cmd_kp = jointKp(leg, j);
         motor.cmd_kd = jointKd(leg, j);
         motor.has_command = true;
@@ -383,6 +388,7 @@ private:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     dm_motor_fusion::MultiLegState msg;
+    msg.header.stamp = ros::Time::now();
     msg.option = current_option_;
 
     for (std::size_t g = 0; g < groups_.size(); ++g)
@@ -391,11 +397,16 @@ private:
       for (std::size_t j = 0; j < 3; ++j)
       {
         const auto& motor = motors_.at(groups_[g].ids[j]);
+        // Disabled motors still need measured feedback before runner reset.
+        if (!motor.enabled)
+          controller_->refresh_motor_status(*motor.motor);
         const double pn = groups_[g].pn[j];
+        const auto feedback = motor.motor->feedback();
+        msg.valid[g * 3 + j] = feedback.valid(feedback_timeout_);
         setJointState(leg, j,
-                      static_cast<double>(motor.motor->Get_Position()) * pn,
-                      static_cast<double>(motor.motor->Get_Velocity()) * pn,
-                      static_cast<double>(motor.motor->Get_tau()) * pn);
+                      static_cast<double>(feedback.q) * pn,
+                      static_cast<double>(feedback.dq) * pn,
+                      static_cast<double>(feedback.tau) * pn);
       }
     }
     state_pub_.publish(msg);
@@ -412,6 +423,7 @@ private:
   int thread_priority_{95};
   double control_hz_{500.0};
   double status_hz_{100.0};
+  double feedback_timeout_{0.5};
   int motor_type_{static_cast<int>(damiao::DM4340)};
 
   int current_option_{static_cast<int>(HighLevelMode::Disable)};

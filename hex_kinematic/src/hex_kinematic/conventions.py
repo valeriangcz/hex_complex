@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 
-LEG_NAMES = ("LB", "LF", "LM", "RB", "RF", "RM")
+LEG_NAMES = ("lb", "lf", "lm", "rb", "rf", "rm")
 MOTOR_JOINT_NAMES = ("thigh", "knee", "ankle")
 COMMAND_JOINT_NAMES = MOTOR_JOINT_NAMES + ("foot",)
 
@@ -13,7 +13,7 @@ COMMAND_JOINT_NAMES = MOTOR_JOINT_NAMES + ("foot",)
 def joint_names(parts=COMMAND_JOINT_NAMES):
     """Return URDF joint names in leg-major order."""
     return tuple(
-        "j_{}_{}".format(leg.lower(), part)
+        "j_{}_{}".format(leg, part)
         for leg in LEG_NAMES
         for part in parts
     )

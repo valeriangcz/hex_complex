@@ -1,8 +1,7 @@
-# Plane profile; no external map or cache is required.
 isaacgym_python: /home/val/Downloads/IsaacGym_Preview_4_Package/isaacgym/python
 device: cpu
 asset:
-  robot_urdf: ../../hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
+  robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
   friction: 0.3275
   self_collisions: 0
 terrain:
@@ -13,7 +12,10 @@ terrain:
 sim:
   dt: 0.0025
   substeps: 2
-  gravity: [0.0, 0.0, -9.81]
+  gravity:
+  - 0.0
+  - 0.0
+  - -9.81
 control:
   decimation: 4
   suction_force_delta: 30.0

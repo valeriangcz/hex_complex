@@ -14,7 +14,7 @@ WORKSPACE_ROOT = PACKAGE_ROOT.parents[1]
 for package in ("hex_kinematic", "hex_isaacgym"):
     sys.path.insert(0, str(WORKSPACE_ROOT / "src" / package / "src"))
 
-from hex_isaacgym import BackendConfig, ExpertCommand, InitialState  # noqa: E402
+from hex_isaacgym import BackendConfig, ActuatorCommand, InitialState  # noqa: E402
 from hex_isaacgym.backend import IsaacGymBackend  # noqa: E402
 
 
@@ -44,7 +44,7 @@ def main():
     config.validate()
     with np.load(str(baseline_file), allow_pickle=False) as baseline:
         initial = InitialState(baseline["pose_0_W_T_R"], baseline["expert_q_init"])
-        command = ExpertCommand(
+        command = ActuatorCommand(
             baseline["expert_q_init"],
             np.zeros((6, 3), dtype=np.float64),
             np.ones(6, dtype=bool),

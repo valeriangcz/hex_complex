@@ -1,0 +1,5 @@
+cmake_minimum_required(VERSION 3.0.2)
+project(perception)
+find_package(catkin REQUIRED COMPONENTS geometry_msgs sensor_msgs)
+catkin_package(CATKIN_DEPENDS geometry_msgs sensor_msgs)
+install(FILES README.md DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION})

@@ -1,0 +1,21 @@
+<launch>
+  <arg name="mode" default="climb"/>
+  <arg name="runner_config" default="$(find hex_runner)/config/$(arg mode).yaml"/>
+  <arg name="backend_config" default="$(eval find('hex_isaacgym') + '/config/' + ('plane.yaml' if arg('mode') == 'climb' else 'complex_surface4.yaml'))"/>
+  <arg name="device" default=""/>
+  <arg name="headless" default="false"/>
+  <arg name="publish_clock" default="false"/>
+  <arg name="data_root" default=""/>
+  <arg name="output_dir" default=""/>
+  <include file="$(find hex_isaacgym)/launch/backend.launch">
+    <arg name="config" value="$(arg backend_config)"/>
+    <arg name="initial_config" value="$(arg runner_config)"/>
+    <arg name="device" value="$(arg device)"/>
+    <arg name="headless" value="$(arg headless)"/>
+    <arg name="publish_clock" value="$(arg publish_clock)"/>
+  </include>
+  <include file="$(find hex_runner)/launch/runner.launch">
+    <arg name="mode" value="$(arg mode)"/><arg name="config" value="$(arg runner_config)"/>
+    <arg name="data_root" value="$(arg data_root)"/><arg name="output_dir" value="$(arg output_dir)"/>
+  </include>
+</launch>

@@ -21,9 +21,27 @@ Motor::Motor(DM_Motor_Type motor_type, Control_Mode ctrl_mode, uint16_t can_id, 
 
 void Motor::receive_data(float q, float dq, float tau)
 {
+  std::lock_guard<std::mutex> lock(feedback_mutex_);
   state_q = q;
   state_dq = dq;
   state_tau = tau;
+  feedback_.q = q;
+  feedback_.dq = dq;
+  feedback_.tau = tau;
+  feedback_.received = true;
+  feedback_.received_at = std::chrono::steady_clock::now();
+}
+
+Motor::Feedback Motor::feedback() const
+{
+  std::lock_guard<std::mutex> lock(feedback_mutex_);
+  return feedback_;
+}
+
+bool Motor::Feedback::valid(double timeout) const
+{
+  return received && std::isfinite(q) && std::isfinite(dq) && std::isfinite(tau) &&
+    std::chrono::duration<double>(std::chrono::steady_clock::now() - received_at).count() <= timeout;
 }
 
 void Motor::set_param(int key, float value)
@@ -80,7 +98,7 @@ Motor_Control::Motor_Control(std::string bus_name, std::unordered_map<uint16_t, 
   {
     std::this_thread::sleep_for(std::chrono::milliseconds(1000));
   }
-  enable_all();
+  // Enabling is owned by an explicit device command, never CAN initialization.
   std::cout << "Motor_Control init success!" << std::endl;
 }
 
@@ -456,6 +474,7 @@ void Motor_Control::canframeCallback(const can_frame& frame)
     }
     else
     {
+      if (buf_frame.can_dlc < 6) continue;  // Not a complete measured motor feedback frame.
       uint16_t q_uint = (uint16_t(buf_frame.data[1]) << 8) | buf_frame.data[2];
       uint16_t dq_uint = (uint16_t(buf_frame.data[3]) << 4) | (buf_frame.data[4] >> 4);
       uint16_t tau_uint = (uint16_t(buf_frame.data[4] & 0xf) << 8) | buf_frame.data[5];

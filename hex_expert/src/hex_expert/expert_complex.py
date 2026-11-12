@@ -7,7 +7,7 @@ from math import *
 import numpy as np
 import warnings
 from spatialmath import SE3
-from hex_kinematic import Kinematic
+from hex_kinematic import Kinematic, LEG_NAMES
 from map_robot_voxles import HexState
 from scipy.interpolate import BSpline
 from scipy.optimize import minimize
@@ -53,7 +53,7 @@ class ExpertComplex:
         self.hex_state = hex_state
 
 
-        self.leg_names=["LB","LF","LM","RB","RF","RM"]
+        self.leg_names = list(LEG_NAMES)
         self.gaits = np.zeros((6,),dtype=np.bool_) #1表示stance 0表示swing
         self.last_gaits = self.gaits.copy()
 
@@ -90,7 +90,6 @@ class ExpertComplex:
         self.contact_count = np.zeros(6,dtype=np.int32)
         #吸附状态
         self.adhesions = np.zeros(6,dtype=np.bool_)
-        self.max_adhesions_force = 300.0
         # 准静态支撑前馈：在机身 R 系中分配接触力，再映射到各腿局部 Jacobian。
         self.total_mass = self.kin.total_mass
         self.world_gravity = np.array([0.0,0.0,-9.81],dtype=np.float64)
@@ -226,7 +225,7 @@ class ExpertComplex:
         joints,mask = self.kin.InverseKin2MultiBatch(B_init_points.T)
         if mask[np.arange(6),self.q3_branches].all():
             self.q_des[:,:3] = joints[np.arange(6),self.q3_branches,:]
-            self.q_des[:,3] = self._GetFootAngle(self.q_des[:,:3],B_init_points,real_robot=False)
+            self.q_des[:,3] = self._GetFootAngle(self.q_des[:,:3],B_init_points)
         else:
             print("current pos\n",B_init_points)
             print("current branch\n",self.q3_branches)
@@ -237,11 +236,12 @@ class ExpertComplex:
         return self.q_des,self.tau_ff,self.adhesions
         
 
-    def RequestSingleStep(self, cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,adhesion_force:np.ndarray)->Tuple[np.ndarray,np.ndarray,np.ndarray]:
+    def RequestSingleStep(self, cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,attached:np.ndarray)->Tuple[np.ndarray,np.ndarray,np.ndarray,np.ndarray]:
         """
         @input cur_se3当前的se3状态，q_cur6，4 主动关节角位置，q_torque 关节电机的扭矩 6，3
-        adhesion_force 6 吸附力大小
-        @output q_des (6,4), tau_ff (6,3), adhesions (6,)
+        attached 6 实际吸附状态布尔量
+        @output q_des (6,4), tau_ff (6,3), adhesions (6,), servo_enabled (6,)
+        支撑腿舵机失能，摆动腿舵机跟踪角度；角度始终为正常弧度值。
         """
         if self.path_se3 == None:
             raise ValueError("path_se3 is None, please use LoadSE3(path_se3) first")
@@ -250,10 +250,13 @@ class ExpertComplex:
         fk_result = self.kin.ForwardKinAll(q_cur)
         q_motor = q_cur[:,:3]
         self.B_e_cur[:] = fk_result["B_foot"].T
-        self.GaitPlanning(cur_se3,q_motor,q_torque,adhesion_force) #更新步态，更新B_e_des_traj
+        attached = np.asarray(attached)
+        if attached.shape != (6,) or attached.dtype != np.bool_:
+            raise ValueError("attached must be a boolean array with shape (6,)")
+        self.GaitPlanning(cur_se3,q_motor,q_torque,attached) #更新步态，更新B_e_des_traj
         self.GetJointAngles(q_motor)# 根据当前角度和期望执行的B_e_des计算目标角度
         self._ComputeQuasiStaticTauFF(cur_se3,q_motor,fk_result["R_com"])
-        return self.q_des, self.tau_ff, self.adhesions
+        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     @staticmethod
     def _Skew(vector:np.ndarray)->np.ndarray:
@@ -357,7 +360,7 @@ class ExpertComplex:
         )
         return self.tau_ff
 
-    def GaitPlanning(self,cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,adhesion_force:np.ndarray):
+    def GaitPlanning(self,cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,attached:np.ndarray):
         #步态的判断和切换
         self.adhesions[self.gaits]=True
         self.adhesions[~self.gaits]=False
@@ -405,12 +408,12 @@ class ExpertComplex:
 
             #判断之前由swing变成stance组的吸附状态 group_index是吸附的那组腿
             swing_groud_index =(self.stance_group_index+1)%2
-            if (adhesion_force[self.groups[swing_groud_index]]>0.8*self.max_adhesions_force).all():
+            if attached[self.groups[swing_groud_index]].all():
             #成功
                 #设置之前那一组释放
                 self.adhesions[self.groups[self.stance_group_index]] = False
                 #判断旧的stance释放是否成功
-                if (adhesion_force[self.groups[self.stance_group_index]]<0.05*self.max_adhesions_force).all():
+                if (~attached[self.groups[self.stance_group_index]]).all():
                 #成功
                     if stance_done:
                         #切换swing和stance轨迹
@@ -458,7 +461,7 @@ class ExpertComplex:
         # print("self.gaits=",self.gaits)
         # print("contact detection=",swing_dones)
 
-    def GetJointAngles(self,q_cur:np.ndarray,real_robot=False):
+    def GetJointAngles(self,q_cur:np.ndarray):
         #q_cur 6,3
         B_e_des = np.zeros((6,3))
         for i in range(6):
@@ -485,7 +488,7 @@ class ExpertComplex:
                 q_idx = min(int(self.q_traj_index[i]),self.q_traj[i].shape[1]-1)
                 self.q_des[i,0:3] = self.q_traj[i][:,q_idx]
         #对于摆动腿部，只有当轨迹离开地面，才会控制吸盘角度
-        self.q_des[:,3] = self._GetFootAngle(self.q_des,B_e_des.T,real_robot)
+        self.q_des[:,3] = self._GetFootAngle(self.q_des,B_e_des.T)
 
         # 根据运动学模型中的范围裁剪前三个关节：
         # - thigh 的范围因腿而异，shape 为 (6, 2)；
@@ -519,63 +522,10 @@ class ExpertComplex:
         self.singularity_legs[enter_sing_mask] = True
         self.singularity_legs[exit_sing_mask] = False            
 
-    def _GetFootAngle(self,q:np.ndarray,B_e:np.ndarray,real_robot)->np.ndarray:
-        """
-        @input q: 6,3, 当前/期望的关节角度, B_e 3,6 在B系下足端当前/期望的位置:
-        @output foot_angle:6
-        调用前需保证已经计算好了落脚点的法向量
-        """
-        """仿真中不进行区分"""
-        """实物中区分支撑和摆动状态"""
-        #以下返回测试用
-        # return -(q[:,1]+q[:,2])-np.pi/2.0
-        
-        foot_angle = np.zeros((6))
-        if real_robot:
-            #对于支撑腿而言，舵机关节只需要保持被动跟随，不需要主动施加扭矩
-            foot_angle[self.gaits]=-999
-            #对于摆动腿而言，需要根据当前摆动腿的期望关节角度计算出末端关节的朝向，然后计算舵机应该旋转的角度
-            # 以下计算在B系下进行
-            active_index = np.nonzero(~self.gaits)[0]
-        else:
-            active_index = np.arange(6)
-
-        if active_index.size > 0:
-            #为了保证摆动过程中足端位置实时与落脚点法向量一致，需要调用
-            # landing_points = self.chs._R2B(self.landing_point[:,active_index],active_index) #3,N
-            B_e = B_e[:,active_index]
-            # choose_support_mask = self.q_traj_index[active_index]<self.B_e_traj_len[active_index]/6.0
-            allign_norms = self.B_landing_n[:,active_index].copy()
-            # allign_norms[:,choose_support_mask] = self.B_support_n[:,active_index[choose_support_mask]].copy()
-        
-
-            # left_mask = active_index<3
-            # allign_norms[0:2,left_mask] *= -1
-            
-            #1）计算落脚点法向量在p平面的投影（p是腿部基坐标系z轴和B_e组成的平面） parallel_norm
-            n_p = np.vstack([-B_e[1,:],
-                             B_e[0,:],
-                             np.zeros(len(active_index))])
-            n_p = n_p/np.maximum(np.linalg.norm(n_p,axis=0),0.00001) #平面法向量
-            vertical_part = n_p*(np.sum(allign_norms*n_p,axis=0)[None,:])
-            #按照这个顺序减出来的，是从landing_norm向量末端指向垂直分量的，代表了吸盘的x轴需要平行的方向
-            parallel_part = vertical_part - allign_norms
-            parallel_norm = parallel_part/np.maximum(np.linalg.norm(parallel_part,axis=0),0.00001)
-            
-            #2) 计算末端关节的x轴在B系下的法向量 x_b3
-            x_b3 = self.kin.Get_X_B3(q[active_index,0:3]).T
-            #3）计算两者点乘，小于0意味着超出旋转范围，需要警告
-            cos_q4 = np.clip(np.sum(parallel_norm*x_b3,axis=0), -1, 1)
-            if (cos_q4<0).any():
-                warnings.warn("Norm of landing points may exceed the range of suction cup")
-                # print(f"x_b3={x_b3}, B_norm={allign_norms}")
-            #4）x_b3 cross parallel_norm 与末端关节z_b3轴是否在一个方向，在的话旋转的角度为正，否则为负
-            rotate_vector = (np.cross(x_b3.T,parallel_norm.T).T)
-            z_b3 = self.kin.Get_Z_B3(q[active_index,0:3]).T
-            rotate_direction = np.sign( np.sum(rotate_vector*z_b3,axis=0) )
-            foot_angle[active_index] = np.clip(np.arccos(cos_q4) * rotate_direction,-pi/2,pi/2)
-        # print(f"foot angle={foot_angle}")
-        return foot_angle
+    def _GetFootAngle(self, q: np.ndarray, B_e: np.ndarray) -> np.ndarray:
+        """Return finite foot angles in radians; enable flags are returned separately."""
+        from hex_kinematic.initial_state import complex_foot_angles
+        return complex_foot_angles(self.kin, q[:, :3], B_e.T, self.B_landing_n.T)
 
     def _WrapAngleError(self,target:np.ndarray,current:np.ndarray)->np.ndarray:
         """计算关节角最短方向误差。"""

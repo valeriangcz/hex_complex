@@ -7,11 +7,11 @@ that owns the simulator.
 
 from .actuation import pd_torques, update_adhesion_forces
 from .config import BackendConfig
-from .types import ExpertCommand, InitialState, RobotState
+from .types import ActuatorCommand, InitialState, RobotState
 
 __all__ = (
     "BackendConfig",
-    "ExpertCommand",
+    "ActuatorCommand",
     "InitialState",
     "RobotState",
     "pd_torques",

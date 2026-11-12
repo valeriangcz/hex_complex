@@ -7,7 +7,7 @@ from math import degrees
 from pathlib import Path
 import numpy as np
 from scipy.ndimage import distance_transform_edt, map_coordinates, label
-from hex_kinematic import Kinematic
+from hex_kinematic import Kinematic, LEG_NAMES
 from .point_map import PointMap
 from spatialmath import SE3
 import os
@@ -442,8 +442,8 @@ class LegVoxels(Voxels):
         for i in range(6):
             bounds = np.vstack([self.kin.joints_limits_thigh[i],[-np.pi/2,np.pi/2]])
             self.sphere_voxels_list.append(SphereVoxels(bounds,sphere_scale))
-        #[LB:[0,1,2,3],LF:[3,4,5,6],[],[]]
-        self._leg_names=["LB","LF","LM","RB","RF","RM"]
+        #[lb:[0,1,2,3],lf:[3,4,5,6],[],[]]
+        self._leg_names = list(LEG_NAMES)
         self.leg_feasi_voxel_index=[]
 
         #计算由身腿部的体素转换到R系下共同组成的机器人整体最外侧的包络边界
@@ -551,7 +551,7 @@ class LegVoxels(Voxels):
     def plot_leg_voxels(self, leg_index: int, plotter=None, show: bool = True):
         """在腿部 B 系中按力学裕量着色显示指定腿的可达体素。
 
-        索引0～5对应 LB、LF、LM、RB、RF、RM。只使用本类的
+        索引0～5对应 lb、lf、lm、rb、rf、rm。只使用本类的
         reachable_legs，不额外检查身体碰撞，不重新计算或保存数据。
         """
         if self.reachable_legs is None:
