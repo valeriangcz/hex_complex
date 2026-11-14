@@ -24,7 +24,8 @@ class ExpertComplex:
     需要调用 LoadSE3(path:List[SE3])才能完成初始化
     """
     def __init__(self,kinematic:Kinematic,hex_state:HexState,singularity_threshold=0.02,
-                 control_dt=0.01,v_max=0.08,w_max=0.2,stance_maxmove_t=0.2,stance_maxmove_w=0.4):
+                 control_dt=0.01,v_max=0.08,w_max=0.2,stance_maxmove_t=0.2,stance_maxmove_w=0.4,
+                 magnetic_attach_above=0.85,magnetic_release_below=0.05):
         # self.body_offset_x = 0.1
         # self.body_offset_y = 0.22
         # self.body_shape=np.zeros((3,6))
@@ -53,6 +54,10 @@ class ExpertComplex:
         self.hex_state = hex_state
 
 
+        if not 0 <= magnetic_release_below < magnetic_attach_above <= 1:
+            raise ValueError("require 0 <= magnetic_release_below < magnetic_attach_above <= 1")
+        self.magnetic_attach_above = magnetic_attach_above
+        self.magnetic_release_below = magnetic_release_below
         self.leg_names = list(LEG_NAMES)
         self.gaits = np.zeros((6,),dtype=np.bool_) #1表示stance 0表示swing
         self.last_gaits = self.gaits.copy()
@@ -239,7 +244,7 @@ class ExpertComplex:
     def RequestSingleStep(self, cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,attached:np.ndarray)->Tuple[np.ndarray,np.ndarray,np.ndarray,np.ndarray]:
         """
         @input cur_se3当前的se3状态，q_cur6，4 主动关节角位置，q_torque 关节电机的扭矩 6，3
-        attached 6 实际吸附状态布尔量
+        attached 6 归一化传感器读数，范围 [0, 1]
         @output q_des (6,4), tau_ff (6,3), adhesions (6,), servo_enabled (6,)
         支撑腿舵机失能，摆动腿舵机跟踪角度；角度始终为正常弧度值。
         """
@@ -250,9 +255,9 @@ class ExpertComplex:
         fk_result = self.kin.ForwardKinAll(q_cur)
         q_motor = q_cur[:,:3]
         self.B_e_cur[:] = fk_result["B_foot"].T
-        attached = np.asarray(attached)
-        if attached.shape != (6,) or attached.dtype != np.bool_:
-            raise ValueError("attached must be a boolean array with shape (6,)")
+        attached = np.asarray(attached, dtype=float)
+        if attached.shape != (6,) or not np.isfinite(attached).all() or ((attached < 0) | (attached > 1)).any():
+            raise ValueError("attached must contain six finite ratios in [0, 1]")
         self.GaitPlanning(cur_se3,q_motor,q_torque,attached) #更新步态，更新B_e_des_traj
         self.GetJointAngles(q_motor)# 根据当前角度和期望执行的B_e_des计算目标角度
         self._ComputeQuasiStaticTauFF(cur_se3,q_motor,fk_result["R_com"])
@@ -361,6 +366,10 @@ class ExpertComplex:
         return self.tau_ff
 
     def GaitPlanning(self,cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,attached:np.ndarray):
+        # Compare in the float32 precision used by MagneticState.
+        attached = np.asarray(attached, dtype=np.float32)
+        confirmed_attached = attached > self.magnetic_attach_above
+        confirmed_released = attached < self.magnetic_release_below
         #步态的判断和切换
         self.adhesions[self.gaits]=True
         self.adhesions[~self.gaits]=False
@@ -408,12 +417,12 @@ class ExpertComplex:
 
             #判断之前由swing变成stance组的吸附状态 group_index是吸附的那组腿
             swing_groud_index =(self.stance_group_index+1)%2
-            if attached[self.groups[swing_groud_index]].all():
+            if confirmed_attached[self.groups[swing_groud_index]].all():
             #成功
                 #设置之前那一组释放
                 self.adhesions[self.groups[self.stance_group_index]] = False
                 #判断旧的stance释放是否成功
-                if (~attached[self.groups[self.stance_group_index]]).all():
+                if confirmed_released[self.groups[self.stance_group_index]].all():
                 #成功
                     if stance_done:
                         #切换swing和stance轨迹

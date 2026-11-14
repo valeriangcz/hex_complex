@@ -1,0 +1,10 @@
+<launch>
+  <arg name="config" default="$(find magnetic)/config/magnetic.yaml"/>
+  <arg name="port" default=""/>
+  <arg name="baud_rate" default=""/>
+  <node pkg="magnetic" type="magnetic_node.py" name="magnetic" output="screen" required="true">
+    <rosparam command="load" file="$(arg config)"/>
+    <param if="$(eval arg('port') != '')" name="port" value="$(arg port)"/>
+    <param if="$(eval arg('baud_rate') != '')" name="baud_rate" value="$(arg baud_rate)" type="int"/>
+  </node>
+</launch>

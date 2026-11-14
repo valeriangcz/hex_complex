@@ -8,19 +8,18 @@ import rospy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped
 from nav_msgs.msg import Path as PathMessage
-from sensor_msgs.msg import Imu, JointState
+from std_msgs.msg import Float64MultiArray
 from rosgraph_msgs.msg import Clock
 from std_srvs.srv import Trigger, TriggerResponse
 from dm_motor_fusion.msg import MultiLegCommand, MultiLegState
 from feetech_servo.msg import servo_cmd, servo_state
 from magnetic.msg import MagneticCmd, MagneticState
-from hex_kinematic import LEG_NAMES, COMMAND_JOINT_NAMES
 from hex_kinematic.ros_contract import read_motor, read_servo, read_servo_enabled, read_magnetic, write_magnetic, write_motor, write_servo
 from hex_kinematic.se3_utils import transform_to_xyzw
 from .config import SimulationConfig
 from .types import ActuatorCommand
 from .backend import IsaacGymBackend
-from .sensors import attachment_state, imu_specific_force
+from .sensors import attachment_ratio, gravity_direction_body
 
 
 class SimulationNode:
@@ -31,17 +30,15 @@ class SimulationNode:
         self.command = self._initial_command()
         self.pending_reset = False
         self.pending_path = None
-        self.attached = config.magnets.copy()
         self.initial_state_pending = True
         self.backend.reset(config.initial_state, config.magnets)
-        self.previous_velocity = None
         self.reset_count = 0
         self.wall_rate_hz = 1. / config.backend.control_dt if wall_rate_hz is None else wall_rate_hz
         self.motor_pub = rospy.Publisher("hex/motor/state", MultiLegState, queue_size=1)
         self.servo_pub = rospy.Publisher("hex/servo/state", servo_state, queue_size=1)
         self.magnetic_pub = rospy.Publisher("hex/magnetic/state", MagneticState, queue_size=1)
         self.pose_pub = rospy.Publisher("hex/perception/pose", PoseStamped, queue_size=1)
-        self.imu_pub = rospy.Publisher("hex/perception/imu", Imu, queue_size=1)
+        self.gravity_pub = rospy.Publisher("hex/perception/gravity", Float64MultiArray, queue_size=1)
         # self.joints_pub = rospy.Publisher("hex/joint_states", JointState, queue_size=1)
         self.diag_pub = rospy.Publisher("hex/sim/diagnostics", DiagnosticArray, queue_size=1)
         self.clock_pub = rospy.Publisher("/clock", Clock, queue_size=1) if publish_clock else None
@@ -114,9 +111,7 @@ class SimulationNode:
             if self.pending_reset:
                 reset_state = self.backend.reset(self.config.initial_state, self.config.magnets)
                 self.command = self._initial_command()
-                self.attached = self.config.magnets.copy()
                 self.initial_state_pending = False
-                self.previous_velocity = None
                 self.pending_reset = False
                 self.reset_count += 1
             if self.initial_state_pending:
@@ -143,10 +138,10 @@ class SimulationNode:
         servo.header.stamp = stamp
         write_servo(servo, state.q[:, 3])
         self.servo_pub.publish(servo)
-        self.attached = attachment_state(self.attached, state.adhesion_force, self.config.backend.suction_force_max)
+        attached = attachment_ratio(state.adhesion_force, self.config.backend.suction_force_max)
         magnetic = MagneticState()
         write_magnetic(magnetic, command.adhesions, "enabled_")
-        write_magnetic(magnetic, self.attached)
+        write_magnetic(magnetic, attached, "attached_")
         write_magnetic(magnetic, [True] * 6, "valid_")
         magnetic.header.stamp = stamp
         self.magnetic_pub.publish(magnetic)
@@ -156,27 +151,8 @@ class SimulationNode:
         pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = map(float, position)
         pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = map(float, quaternion)
         self.pose_pub.publish(pose)
-        imu = Imu()
-        imu.header.stamp, imu.header.frame_id = stamp, "body"
-        imu.orientation = pose.pose.orientation
-        angular = state.W_T_R[:3, :3].T @ state.angular_velocity
-        imu.angular_velocity.x, imu.angular_velocity.y, imu.angular_velocity.z = map(float, angular)
-        acceleration, valid = imu_specific_force(state.W_T_R[:3, :3], state.linear_velocity,
-                    self.previous_velocity, self.config.backend.control_dt, self.config.backend.gravity)
-        imu.linear_acceleration.x, imu.linear_acceleration.y, imu.linear_acceleration.z = map(float, acceleration)
-        if not valid:
-            imu.linear_acceleration_covariance[0] = -1.
-        self.imu_pub.publish(imu)
-        self.previous_velocity = state.linear_velocity.copy()
-        # joints = JointState()
-        # joints.header.stamp, joints.header.frame_id = stamp, "body"
-        # joints.name = ["j_{}_{}".format(leg, joint) for leg in LEG_NAMES for joint in COMMAND_JOINT_NAMES]
-        # joints.position, joints.velocity = state.q.reshape(-1).tolist(), state.q_dot.reshape(-1).tolist()
-        # effort = np.zeros((6, 4))
-        # effort[:, :3] = state.q_torque
-        # joints.effort = effort.reshape(-1).tolist()
-        # self.joints_pub.publish(joints)
-        
+        direction = gravity_direction_body(state.W_T_R[:3, :3], self.config.backend.gravity)
+        self.gravity_pub.publish(Float64MultiArray(data=direction.tolist()))
         status = DiagnosticStatus(name="hex_sim", hardware_id="isaacgym", level=0, message="RUNNING")
         values = dict(sim_time=state.sim_time, run_elapsed=state.run_elapsed, reset_count=self.reset_count,
                       motor_mode=command.motor_mode, servo_enabled=command.servo_enabled.tolist(),

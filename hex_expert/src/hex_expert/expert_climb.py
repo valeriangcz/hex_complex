@@ -9,7 +9,6 @@ No simulator is owned.
 import math
 
 import numpy as np
-from spatialmath import SE3
 
 from hex_kinematic import Kinematic, LEG_NAMES
 
@@ -28,6 +27,7 @@ class ExpertClimb:
         contact_confirm_steps=10, contact_velocity_threshold=0.03,
         torque_blend_time=0.1, stance_height=0.08,
         joint_position_gain=45.0,
+        magnetic_attach_above=0.85, magnetic_release_below=0.05,
     ):
         if not isinstance(kinematic, Kinematic):
             raise TypeError("kinematic must be hex_kinematic.Kinematic")
@@ -53,6 +53,10 @@ class ExpertClimb:
             raise ValueError("motor_torque_limits must be positive finite scalar or (6,3)")
 
         self.kin = kinematic
+        if not 0 <= magnetic_release_below < magnetic_attach_above <= 1:
+            raise ValueError("require 0 <= magnetic_release_below < magnetic_attach_above <= 1")
+        self.magnetic_attach_above = magnetic_attach_above
+        self.magnetic_release_below = magnetic_release_below
         self.leg_names = list(LEG_NAMES)
         self.dt = float(control_dt)
         self.motor_torque_limits = limits.copy()
@@ -63,7 +67,6 @@ class ExpertClimb:
         self.joint_position_gain = float(joint_position_gain)
         self.torque_blend_steps = max(1, round(torque_blend_time / self.dt))
         self.total_mass = float(kinematic.total_mass)
-        self.world_gravity = np.array([0.0, 0.0, -9.81])
         self.groups = np.array([[0, 1, 5], [2, 3, 4]])
         self._swing_start_leg = np.zeros((6, 3))
         self._swing_start_leg[:, 0] = 0.18
@@ -127,25 +130,28 @@ class ExpertClimb:
         self.Reset(q_init)
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy()
 
-    def RequestSingleStep(self, cur_se3, q_cur, q_torque, attached, command):
+    def RequestSingleStep(self, gravity_direction_body, q_cur, q_torque, attached, command):
         """Advance one control period without modifying inputs.
 
-        cur_se3: body pose in world W_T_R as spatialmath.SE3.
+        gravity_direction_body: finite nonzero (3,) downward direction in body.
+        The direction is normalized internally; gravity magnitude is 9.81 m/s².
         q_cur: (6,4) drive angles; q_torque: (6,3) measured motor torques.
-        attached: (6,) measured per-foot attachment booleans.
+        attached: (6,) normalized per-foot sensor ratios in [0, 1].
         command: (3,) body vx/vy in m/s and yaw rate in rad/s.
         Returns q_des (6,4), tau_ff (6,3), adhesions (6,), servo_enabled (6,).
         Stance servos are passive; swing servos track their target angles.
         """
-        if not isinstance(cur_se3, SE3) or len(cur_se3) != 1:
-            raise TypeError("cur_se3 must be a single spatialmath.SE3 pose")
-        if not np.isfinite(cur_se3.A).all():
-            raise ValueError("cur_se3 must be finite")
+        direction = self._array(gravity_direction_body, (3,), "gravity_direction_body")
+        scale = np.max(np.abs(direction))
+        if scale == 0:
+            raise ValueError("gravity_direction_body must be nonzero")
+        direction = direction / scale
+        gravity_body = 9.81 * direction / np.linalg.norm(direction)
         q_cur = self._array(q_cur, (6, 4), "q_cur")
         q_torque = self._array(q_torque, (6, 3), "q_torque")
-        attached = np.asarray(attached)
-        if attached.shape != (6,) or attached.dtype != np.bool_:
-            raise ValueError("attached must be a boolean array with shape (6,)")
+        attached = np.asarray(attached, dtype=float)
+        if attached.shape != (6,) or not np.isfinite(attached).all() or ((attached < 0) | (attached > 1)).any():
+            raise ValueError("attached must contain six finite ratios in [0, 1]")
         command = self._array(command, (3,), "command")
         if not self.set_init:
             self._initialize(q_cur)
@@ -163,7 +169,7 @@ class ExpertClimb:
         else:
             self.contact_count.fill(0)
         com = self.kin.ForwardKinAll(q_cur)["R_com"]
-        self._ComputeQuasiStaticTauFF(cur_se3, q_cur[:, :3], com)
+        self._ComputeQuasiStaticTauFF(gravity_body, q_cur[:, :3], com)
         self.compute_count += 1
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
@@ -187,6 +193,9 @@ class ExpertClimb:
         contact = ((self.estimated_contact_force <= -self.contact_force_threshold)
                    & (np.abs(self.normal_foot_velocity) <= self.contact_velocity_threshold)
                    & ~self.gaits & self._swing_reached)
+        #为了方便调试，加入使用高度判断的落地检测
+        contact |= (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
+        
         # Scattered dynamic-load spikes must not accumulate into a false landing.
         self.contact_count[~contact] = 0
         self.contact_count[contact] += 1
@@ -196,21 +205,27 @@ class ExpertClimb:
         return detected
 
     def _PlanGait(self, command, q_cur, q_torque, attached):
+        # Compare in the float32 precision used by MagneticState.
+        attached = np.asarray(attached, dtype=np.float32)
+        confirmed_attached = attached > self.magnetic_attach_above
+        confirmed_released = attached < self.magnetic_release_below
         landed = self._ContactDetection(q_cur, q_torque)
         # Start stance from the measured touchdown, not the deeper press target.
         self._foot_target_leg[landed] = self.B_e_cur.T[landed]
-        self.gaits[landed] = True
+        self.gaits[landed|confirmed_attached] = True
         self.adhesions[:] = self.gaits
         next_targets = self._ComputeFootTargets(command)
-        # A confirmed magnet may already hold a touchdown foot while pressure is
-        # still being confirmed. Do not drag that foot relative to the body.
-        settling = attached & self._swing_reached & ~self.gaits
-        next_targets[settling, :2] = self.B_e_cur.T[settling, :2]
+
         workspace = self._CheckWorkspace(next_targets)
         clearance = self._CheckLegClearance(next_targets)
         self.adhesions[self._swing_reached] = True
         swing = ~self.gaits
+
         set_all = swing & ((clearance & workspace) | ~self._swing_reached)
+        # for i in range(6):
+        #     if not self.gaits[i]:
+        #         print(f"swing {i} clearance={clearance[i]} workspace={workspace[i]} swing_reached={self._swing_reached[i]} set_all={set_all[i]}")
+        # print("\n")
         set_z = swing & (~clearance | ~workspace)
         self._foot_target_leg[set_z, 2] = next_targets[set_z, 2]
         self._foot_target_leg[set_all] = next_targets[set_all]
@@ -222,10 +237,9 @@ class ExpertClimb:
 
         new_group = self.groups[1 - self.stance_group_index]
         old_group = self.groups[self.stance_group_index]
-        released = ~attached
-        if np.all((attached & self.gaits)[new_group]):
+        if np.all((confirmed_attached & self.gaits)[new_group]):
             self.adhesions[old_group] = False
-            if np.all(released[old_group]):
+            if np.all(confirmed_released[old_group]):
                 self.stance_group_index = 1 - self.stance_group_index
                 self._swing_reached.fill(False)
                 self.contact_count.fill(0)
@@ -273,7 +287,7 @@ class ExpertClimb:
         descending = ~self.gaits & self._swing_reached
         # Return to the lift waypoint, then descend there. Advancing xy for the
         # entire descent overshoots the lateral workspace at large vy.
-        next_leg[descending, :2] = feet[descending, :2]
+        # next_leg[descending, :2] = feet[descending, :2]
         next_leg[descending, 2] = np.maximum(
             next_leg[descending, 2] - speed_z[descending] * self.dt, -0.2)
         # for i in range(6):
@@ -289,7 +303,7 @@ class ExpertClimb:
         # The original atan(y/x) test accepts negative x; retain its semantics.
         # atan2 plus wrapping avoids dividing by zero at x=0.
         angle = (np.arctan2(feet[:, 1], feet[:, 0]) + np.pi / 2.0) % np.pi - np.pi / 2.0
-        return ((xy_length >= 0.14) & (xy_length <= 0.26)
+        return ((xy_length >= 0.14) & (xy_length <= 0.3)
                 & (feet[:, 2] >= -0.2) & (feet[:, 2] <= 0.1)
                 & (angle >= -np.pi / 4.0) & (angle <= np.pi / 4.0))
 
@@ -297,8 +311,8 @@ class ExpertClimb:
         feet_R = self.kin._B2R(feet.T, np.arange(6)).T
         free = np.zeros(6, dtype=bool)
         for back, front, middle in ((0, 1, 2), (3, 4, 5)):
-            free[back] = np.linalg.norm(feet_R[back, :2] - feet_R[middle, :2]) > 0.12
-            free[front] = np.linalg.norm(feet_R[front, :2] - feet_R[middle, :2]) > 0.12
+            free[back] = np.linalg.norm(feet_R[back, :2] - feet_R[middle, :2]) > 0.06
+            free[front] = np.linalg.norm(feet_R[front, :2] - feet_R[middle, :2]) > 0.06
             free[middle] = free[back] & free[front]
         return free
 
@@ -307,7 +321,7 @@ class ExpertClimb:
         x, y, z = vector
         return np.array([[0.0, -z, y], [z, 0.0, -x], [-y, x, 0.0]])
 
-    def _ComputeQuasiStaticTauFF(self, cur_se3, q_cur, R_com):
+    def _ComputeQuasiStaticTauFF(self, gravity_body, q_cur, R_com):
         """Balance gravity in body R, then map forces into local Jacobians.
 
         As in the source climbing expert, swing-leg target torque is zero.
@@ -324,7 +338,7 @@ class ExpertClimb:
             for column, arm in enumerate(arms):
                 A[:3, 3 * column:3 * column + 3] = np.eye(3)
                 A[3:, 3 * column:3 * column + 3] = self._Skew(arm)
-            b = np.r_[-self.total_mass * (cur_se3.R.T @ self.world_gravity), np.zeros(3)]
+            b = np.r_[-self.total_mass * gravity_body, np.zeros(3)]
             if np.linalg.matrix_rank(A) == 6:
                 forces = A.T @ np.linalg.pinv(A @ A.T, rcond=1e-9) @ b
                 if (np.isfinite(forces).all()

@@ -1,0 +1,6 @@
+<launch>
+  <arg name="config" default="$(find perception)/config/imu.yaml"/>
+  <node pkg="perception" type="imu_node.py" name="imu_gravity" output="screen">
+    <param name="config" value="$(arg config)"/>
+  </node>
+</launch>

@@ -12,7 +12,7 @@ roslaunch hex_runner sim.launch mode:=climb
 ```
 
 订阅 `/hex/motor/command`、`/hex/servo/command`、`/hex/magnetic/command`，
-发布对应 state、`/hex/perception/imu`、`/hex/perception/pose`、`/hex/joint_states`。
+发布对应 state、`/hex/perception/gravity`、`/hex/perception/pose`。
 协议与硬件相同，详见 hex_runner/README.md。回调只缓存命令，物理线程独占物理张量。
 目标按100Hz实时推进，每次推进4个0.0025秒物理步；不依赖 runner 驱动物理步进。
 计算超时不补算追赶；实际速率受设备性能影响，本机GPU管线回归慢于实时，/clock仍按实际物理步递增。
@@ -21,7 +21,8 @@ roslaunch hex_runner sim.launch mode:=climb
 MIT 使用消息的 kp/kd、位置、速度、前馈，扭矩受 URDF 限制。
 舵机每腿最终使能为 enable && enable_<leg>；失能腿的 foot 主动力矩为零，
 使能腿继续位置 PD；被动关节约束仍按模型执行。
-磁吸 attached 由物理吸附力按85%附着、5%释放阈值滞回得出，不回显 enable。
+磁吸 attached_* 发布 clip(物理吸附力/最大吸附力, 0, 1)，不回显 enabled_*，不在仿真端进行阈值判定。
+正常反馈 valid_* 均为 true；吸附/释放阈值在 runner 各模式配置中设置，由 expert 统一判断。
 仿真施加的力与接触力只在 `/hex/sim/diagnostics` 发布，不作为虚构实物传感器输入。
 IMU 输出 world 中姿态、body 系角速度和扣除重力后转换至 body 的比力；
 reset 后首帧线加速度不可用，协方差首项为-1。完整位姿 frame_id=world，根链为body。
@@ -52,3 +53,6 @@ python3 -m unittest discover -s src/hex_isaacgym/tests -v
 
 执行器回调直接更新可变的 ActuatorCommand 字段，保留未涉及的通道。回调间使用锁；
 物理循环持有同一对象引用，步进中读取到的模式可能更新，但已转换的目标张量通常下一周期更新。
+
+重力 topic 为 `std_msgs/Float64MultiArray`，data 是由实际世界重力投影得到的机身系单位向下向量。
+不再发布旧的 sensor_msgs/Imu topic。

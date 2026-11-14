@@ -18,7 +18,7 @@ sim:
   - -9.81
 control:
   decimation: 4
-  suction_force_delta: 30.0
-  suction_force_max: 300.0
+  suction_force_delta: 5.0
+  suction_force_max: 200.0
   initial_buffer_time: 0.5
   contact_threshold: 1.0

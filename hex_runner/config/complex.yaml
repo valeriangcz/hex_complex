@@ -10,6 +10,8 @@ motor_kd: 1.0
 motor_torque_limit: 27.0
 robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 expert_parameters:
+  magnetic_attach_above: 0.85  # 六腿统一，高于此比例确认吸附
+  magnetic_release_below: 0.05  # 六腿统一，低于此比例确认释放
   v_max: 0.08
   w_max: 0.2
   stance_maxmove_t: 0.2

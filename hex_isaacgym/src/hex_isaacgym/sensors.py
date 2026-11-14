@@ -2,17 +2,15 @@
 import numpy as np
 
 
-def attachment_state(previous, force, maximum, attach_ratio=.85, release_ratio=.05):
-    force = np.asarray(force)
-    if not 0 <= release_ratio < attach_ratio <= 1 or maximum <= 0:
-        raise ValueError("invalid attachment hysteresis")
-    previous = np.asarray(previous, dtype=bool)
-    return np.where(force >= attach_ratio * maximum, True,
-                    np.where(force <= release_ratio * maximum, False, previous))
+def attachment_ratio(force, maximum):
+    """Normalize measured adhesion force; experts own attachment thresholds."""
+    return np.clip(np.asarray(force, dtype=float) / maximum, 0.0, 1.0)
 
 
-def imu_specific_force(rotation, velocity, previous_velocity, dt, gravity):
-    if previous_velocity is None:
-        return np.zeros(3), False
-    acceleration = (np.asarray(velocity) - previous_velocity) / dt
-    return np.asarray(rotation).T @ (acceleration - np.asarray(gravity)), True
+def gravity_direction_body(rotation, gravity):
+    """Unit physical down direction in body axes, using actual world gravity."""
+    gravity = np.asarray(gravity, dtype=float)
+    norm = np.linalg.norm(gravity)
+    if gravity.shape != (3,) or not np.isfinite(gravity).all() or not np.isfinite(norm) or norm == 0:
+        raise ValueError("simulation gravity must be finite and nonzero")
+    return np.asarray(rotation).T @ (gravity / norm)

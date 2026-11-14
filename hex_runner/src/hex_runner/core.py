@@ -26,10 +26,11 @@ def finite(value, shape):
 class Feedback:
     q: np.ndarray
     tau: np.ndarray
-    pose: np.ndarray
-    attached: np.ndarray
+    pose: object  # (4,4) for complex, None for climb.
+    attached: np.ndarray  # Normalized sensor ratios, not booleans.
     enabled: np.ndarray
     motor_sample: object
+    gravity_direction_body: object = None  # (3,) unit down vector for climb.
 
 
 @dataclass
@@ -77,7 +78,10 @@ class FeedbackCache:
                     return None, "stale " + name, ages
             motor, servo, magnetic, pose = [self.values[name][0] for name in ("motor", "servo", "magnetic", pose_source)]
             q = np.column_stack((motor[0], servo))
-            return Feedback(q, motor[1], pose, magnetic[0], magnetic[1], self.values["motor"][3]), "", ages
+            return Feedback(q=q, tau=motor[1], pose=pose if pose_source == "se3" else None,
+                            attached=magnetic[0], enabled=magnetic[1],
+                            motor_sample=self.values["motor"][3],
+                            gravity_direction_body=pose if pose_source == "gravity" else None), "", ages
 
 
 class Runner:

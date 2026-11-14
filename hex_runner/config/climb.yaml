@@ -6,7 +6,7 @@
 
 workspace_root: ../../..
 expert_type: climb
-pose_source: imu
+pose_source: gravity
 control_dt: 0.01
 servo_hz: 30.0
 magnetic_hz: 30.0
@@ -16,9 +16,11 @@ motor_kd: 1.0
 motor_torque_limit: 27.0
 robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 expert_parameters:
+  magnetic_attach_above: 0.85  # 六腿统一，高于此比例确认吸附
+  magnetic_release_below: 0.05  # 六腿统一，低于此比例确认释放
   contact_force_threshold: 7.0
   contact_confirm_steps: 10
-  contact_velocity_threshold: 0.03  # m/s，连续受压且法向运动接近停止才确认落地
+  contact_velocity_threshold: 0.1  # m/s，连续受压且法向运动接近停止才确认落地
   torque_blend_time: 0.1
   stance_height: 0.08
 velocity_scales:

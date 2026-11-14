@@ -46,7 +46,9 @@ class ExpertAdapter:
 
     def compute(self, feedback, velocity):
         old_group = self.expert.stance_group_index
-        arguments = (SE3(feedback.pose, check=False), feedback.q.copy(), feedback.tau.copy(), feedback.attached.copy())
+        state = (feedback.gravity_direction_body.copy() if self.config.expert_type == "climb"
+                 else SE3(feedback.pose, check=False))
+        arguments = (state, feedback.q.copy(), feedback.tau.copy(), feedback.attached.copy())
         result = self.expert.RequestSingleStep(*(arguments + (velocity,) if self.config.expert_type == "climb" else arguments))
         self.switch_count += int(old_group != self.expert.stance_group_index)
         return result

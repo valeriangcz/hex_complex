@@ -35,9 +35,10 @@ def write_servo_enabled(message, enabled):
 
 
 def read_magnetic(message, prefix=""):
-    return np.array([getattr(message, prefix + leg) for leg in LEG_NAMES], dtype=bool)
+    return np.array([getattr(message, prefix + leg) for leg in LEG_NAMES],
+                    dtype=float if prefix == "attached_" else bool)
 
 
 def write_magnetic(message, values, prefix=""):
     for leg, value in zip(LEG_NAMES, values):
-        setattr(message, prefix + leg, bool(value))
+        setattr(message, prefix + leg, float(value) if prefix == "attached_" else bool(value))

@@ -8,7 +8,7 @@ import rospy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped, Twist
 from nav_msgs.msg import Path as PathMessage
-from sensor_msgs.msg import Imu
+from std_msgs.msg import Float64MultiArray
 from std_srvs.srv import Trigger, TriggerResponse
 from dm_motor_fusion.msg import MultiLegCommand, MultiLegState
 from feetech_servo.msg import servo_cmd, servo_state
@@ -38,8 +38,9 @@ class RunnerNode:
             rospy.Subscriber("hex/motor/state", MultiLegState, self._motor, queue_size=1),
             rospy.Subscriber("hex/servo/state", servo_state, self._servo, queue_size=1),
             rospy.Subscriber("hex/magnetic/state", MagneticState, self._magnetic, queue_size=1),
-            rospy.Subscriber("hex/perception/" + ("pose" if config.pose_source == "se3" else "imu"),
-                             PoseStamped if config.pose_source == "se3" else Imu, self._pose, queue_size=1),
+            rospy.Subscriber("hex/perception/" + ("pose" if config.pose_source == "se3" else "gravity"),
+                             PoseStamped if config.pose_source == "se3" else Float64MultiArray,
+                             self._pose if config.pose_source == "se3" else self._gravity, queue_size=1),
             rospy.Subscriber("hex/cmd_vel", Twist, self._velocity, queue_size=1)]
         self.services = [rospy.Service("hex/runner/" + action, Trigger,
                          lambda request, operation=action: self._operation(operation))
@@ -68,26 +69,30 @@ class RunnerNode:
         self._update("servo", lambda msg: (finite(read_servo(msg), (6,)), all(msg.valid)), message)
 
     def _magnetic(self, message):
-        self._update("magnetic", lambda msg: ((read_magnetic(msg),
+        self._update("magnetic", lambda msg: ((finite(read_magnetic(msg, "attached_"), (6,)),
                      read_magnetic(msg, "enabled_")), all(read_magnetic(msg, "valid_"))), message)
 
     def _pose(self, message):
         def decode(msg):
-            if self.config.pose_source == "se3":
-                if msg.header.frame_id != "world":
-                    raise ValueError("SE3 frame must be world")
-                position = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
-                orientation = msg.pose.orientation
-            else:
-                if msg.header.frame_id != "body" or msg.orientation_covariance[0] < 0:
-                    raise ValueError("IMU must provide body-aligned orientation")
-                # Internal placeholder only; climb uses rotation, never translation.
-                position, orientation = [0., 0., 0.], msg.orientation
+            if msg.header.frame_id != "world":
+                raise ValueError("SE3 frame must be world")
+            position = [msg.pose.position.x, msg.pose.position.y, msg.pose.position.z]
+            orientation = msg.pose.orientation
             quaternion = finite([orientation.x, orientation.y, orientation.z, orientation.w], (4,))
             if abs(np.linalg.norm(quaternion) - 1.0) > 1e-3:
                 raise ValueError("orientation quaternion must have unit norm")
             return transform_from_xyzw(finite(position, (3,)), quaternion), True
-        self._update(self.config.pose_source, decode, message)
+        self._update("se3", decode, message)
+
+    def _gravity(self, message):
+        def decode(msg):
+            direction = finite(msg.data, (3,))
+            scale = np.max(np.abs(direction))
+            if scale == 0:
+                raise ValueError("body gravity direction must be nonzero")
+            direction /= scale
+            return direction / np.linalg.norm(direction), True
+        self._update("gravity", decode, message)
 
     def _snapshot(self, now):
         return self.cache.snapshot(now, self.config.feedback_timeout, self.config.pose_source)

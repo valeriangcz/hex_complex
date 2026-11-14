@@ -40,7 +40,7 @@ def fake_devices(mode):
     from feetech_servo.msg import servo_cmd, servo_state
     from magnetic.msg import MagneticCmd as MagCommand, MagneticState as MagState
     from geometry_msgs.msg import PoseStamped
-    from sensor_msgs.msg import Imu
+    from std_msgs.msg import Float64MultiArray
     from std_srvs.srv import SetBool, SetBoolResponse
     from hex_kinematic.ros_contract import read_motor, read_servo, read_servo_enabled, write_motor, write_servo, read_magnetic, write_magnetic
     from hex_kinematic.se3_utils import transform_to_xyzw
@@ -50,8 +50,8 @@ def fake_devices(mode):
     from hex_runner.config import RunnerConfig
     initial=RunnerConfig.load(workspace/'src/hex_runner/config'/(mode+'.yaml'),workspace/'data').initial_state
     q, pose=initial.q.copy(), initial.W_T_R.copy()
-    state = dict(q=q, tau=np.zeros((6,3)), enabled=initial.magnetic.copy(), attached=initial.magnetic.copy(),
-                 invalid=False, change_at=0)
+    state = dict(q=q, tau=np.zeros((6,3)), enabled=initial.magnetic.copy(), attached=initial.magnetic.astype(float),
+                 invalid=False, change_at=0, ramp_start=initial.magnetic.astype(float))
     def motor(message):
         if message.option == 1:
             state['q'][:, :3] = read_motor(message, 'pos')
@@ -62,6 +62,7 @@ def fake_devices(mode):
     def magnet(message):
         desired = read_magnetic(message)
         if not np.array_equal(state['enabled'], desired):
+            state['ramp_start'] = state['attached'].copy()
             state['enabled'] = desired
             state['change_at'] = time.monotonic()
     def invalidate(request):
@@ -73,10 +74,10 @@ def fake_devices(mode):
     service = rospy.Service('test/invalidate',SetBool,invalidate)
     pubs = [rospy.Publisher(name,typ,queue_size=1) for name,typ in (
         ('hex/motor/state',MultiLegState),('hex/servo/state',servo_state),('hex/magnetic/state',MagState),
-        ('hex/perception/pose',PoseStamped),('hex/perception/imu',Imu))]
+        ('hex/perception/pose',PoseStamped),('hex/perception/gravity',Float64MultiArray))]
     while not rospy.is_shutdown():
-        if time.monotonic() - state['change_at'] > .1:
-            state['attached'] = state['enabled'].copy()
+        fraction = min((time.monotonic() - state['change_at']) / .1, 1.)
+        state['attached'] = state['ramp_start'] + fraction * (state['enabled'] - state['ramp_start'])
         stamp = rospy.Time.now()
         motor_msg = MultiLegState(option=1,valid=[True]*18)
         motor_msg.header.stamp = stamp
@@ -86,15 +87,15 @@ def fake_devices(mode):
         write_servo(servo_msg,state['q'][:,3])
         magnetic = MagState()
         write_magnetic(magnetic, state['enabled'], 'enabled_')
-        write_magnetic(magnetic, state['attached'])
+        write_magnetic(magnetic, state['attached'], 'attached_')
         write_magnetic(magnetic, [not state['invalid']]*6, 'valid_')
         magnetic.header.stamp = stamp
         p,quat = transform_to_xyzw(pose)
         pose_msg = PoseStamped(); pose_msg.header.stamp=stamp; pose_msg.header.frame_id='world'
         pose_msg.pose.position.x,pose_msg.pose.position.y,pose_msg.pose.position.z=map(float,p)
         pose_msg.pose.orientation.x,pose_msg.pose.orientation.y,pose_msg.pose.orientation.z,pose_msg.pose.orientation.w=map(float,quat)
-        imu=Imu();imu.header.stamp=stamp;imu.header.frame_id='body';imu.orientation=pose_msg.pose.orientation
-        for pub,msg in zip(pubs,[motor_msg,servo_msg,magnetic,pose_msg,imu]):pub.publish(msg)
+        gravity=Float64MultiArray(data=(pose[:3,:3].T @ np.array([0.,0.,-1.])).tolist())
+        for pub,msg in zip(pubs,[motor_msg,servo_msg,magnetic,pose_msg,gravity]):pub.publish(msg)
         time.sleep(.01)
 
 
@@ -103,7 +104,7 @@ def main():
     parser.add_argument('--backend',choices=['fake','isaac'],default='fake')
     parser.add_argument('--mode',choices=['climb','complex'],default='climb')
     parser.add_argument('--joystick',action='store_true',help='Use Joy buttons 1/0/4 for complex reset/start/pause')
-    parser.add_argument('--pose-source',choices=['imu','se3'])
+    parser.add_argument('--pose-source',choices=['gravity','se3'])
     parser.add_argument('--device',default='cpu')
     parser.add_argument('--climb-velocity',type=float,nargs=3,default=[.02,0.,0.],metavar=('VX','VY','WZ'),help='Physical climb command in m/s, m/s, rad/s')
     parser.add_argument('--motion-seconds',type=float,help='Run the full motion interval rather than ending after the required gait switches')
@@ -293,6 +294,19 @@ def main():
                         checks.append('pause permits reset or disable; disable latch prevents start until reset')
                     rospy.wait_for_service('test/invalidate',timeout=5)
                     invalidator=rospy.ServiceProxy('test/invalidate',SetBool)
+                    from hex_runner.config import RunnerConfig
+                    initial = RunnerConfig.load(workspace/'src/hex_runner/config'/(args.mode+'.yaml'), workspace/'data').initial_state
+                    wait_for(lambda: latest.get('reset_count', 0) >= 2, 'reset applied before fault injection')
+                    reset_counts = counts.copy()
+                    wait_for(lambda: all(counts[name] > reset_counts[name] for name in counts),
+                             'all output channels refreshed after reset')
+                    wait_for(lambda: read_servo_enabled(commands['servo']).all() and
+                             commands['motor'].option == 1 and
+                             np.allclose(read_motor(commands['motor'], 'pos'), initial.q[:, :3]) and
+                             np.allclose(read_motor(commands['motor'], 'tau'), 0) and
+                             np.allclose(read_servo(commands['servo']), initial.q[:, 3]) and
+                             np.array_equal(read_magnetic(commands['magnetic']), initial.magnetic),
+                             'reset outputs received before fault injection')
                     old=commands.copy();invalidator(True)
                     wait_for(lambda:latest.get('phase')=='FAULT','invalid magnetic fault')
                     invalidator(False);time.sleep(.3)
@@ -331,7 +345,7 @@ def main():
                         [pose_msg.orientation.x,pose_msg.orientation.y,pose_msg.orientation.z,pose_msg.orientation.w])
                     np.testing.assert_allclose(pose_matrix,initial.W_T_R,atol=2e-6)
                     np.testing.assert_array_equal(read_magnetic(frames['magnetic'][stamp],'enabled_'),initial.magnetic)
-                    np.testing.assert_array_equal(read_magnetic(frames['magnetic'][stamp]),initial.magnetic)
+                    np.testing.assert_array_equal(read_magnetic(frames['magnetic'][stamp], 'attached_'),initial.magnetic)
                     checks.append('sim zero torque, servo disable, unsupported mode rejection and exact first reset feedback')
                 report=dict(status='PASS',backend=args.backend,mode=args.mode,device=args.device,checks=checks,
                             compute_count=latest.get('compute_count'),gait_switch_count=latest.get('gait_switch_count'),

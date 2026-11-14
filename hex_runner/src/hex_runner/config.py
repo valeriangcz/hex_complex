@@ -17,7 +17,7 @@ def resource(value, base):
 @dataclass
 class RunnerConfig:
     expert_type: str = "climb"
-    pose_source: str = "imu"
+    pose_source: str = "gravity"
     control_dt: float = 0.01
     servo_hz: float = 20.0
     magnetic_hz: float = 20.0
@@ -36,10 +36,12 @@ class RunnerConfig:
     data_root: Path = None
 
     def __post_init__(self):
-        if self.expert_type not in ("climb", "complex") or self.pose_source not in ("imu", "se3"):
-            raise ValueError("expert_type must be climb/complex and pose_source imu/se3")
+        if self.expert_type not in ("climb", "complex") or self.pose_source not in ("gravity", "se3"):
+            raise ValueError("expert_type must be climb/complex and pose_source gravity/se3")
         if self.expert_type == "complex" and self.pose_source != "se3":
             raise ValueError("complex requires full SE3 localization")
+        if self.expert_type == "climb" and self.pose_source != "gravity":
+            raise ValueError("climb requires body gravity direction")
         for name in ("control_dt", "servo_hz", "magnetic_hz", "feedback_timeout",
                      "motor_torque_limit", "completion_translation", "completion_rotation", "failure_path_distance"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:

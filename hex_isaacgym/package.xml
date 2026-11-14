@@ -8,7 +8,7 @@
   <depend>geometry_msgs</depend>
   <depend>nav_msgs</depend>
   <depend>rospy</depend>
-  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>dm_motor_fusion</depend>
   <depend>feetech_servo</depend>

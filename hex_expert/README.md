@@ -8,7 +8,6 @@ ExpertComplex 专家控制算法。运行时依赖注入运动学与可行性对
 
 ```python
 import numpy as np
-from spatialmath import SE3
 from hex_kinematic import Kinematic
 from hex_expert import ExpertClimb
 
@@ -16,13 +15,16 @@ kin = Kinematic(urdf_path="path/to/hex_all.urdf")
 expert = ExpertClimb(kin, control_dt=0.01,
                      motor_torque_limits=27.0)
 # 所有输入按 lb/lf/lm/rb/rf/rm 顺序。q_cur (6,4)，q_torque (6,3)，
-# attached (6,) 为每足实际吸附状态，dtype=bool；cur_se3 为当前 W_T_R。
+# attached (6,) 为每足归一化传感器读数，范围 [0, 1]；gravity_direction_body 为机身系向下的重力方向。
 # 每个控制周期用真实反馈调用一次：
 q_des, tau_ff, adhesions, servo_enabled = expert.RequestSingleStep(
-    cur_se3, q_cur, q_torque, attached,
+    gravity_direction_body, q_cur, q_torque, attached,
     command=np.array([0.02, 0.0, 0.0]),  # 机身 vx、vy (m/s)、yaw_rate (rad/s)
 )
 ```
+
+climb 的重力方向输入为有限非零 `(3,)` 向量，内部归一化并乘以 9.81 m/s²；
+不需要 SE3。水平机身 Z 轴朝上时方向为 `[0, 0, -1]`。complex 仍使用完整 SE3。
 
 两个专家均返回 `(6,4)` 关节目标、`(6,3)` 前馈扭矩、`(6,)` 吸附开关、
 `(6,)` 舵机使能的独立副本。舵机使能为 bool 数组 `~gaits`：支撑腿失能、摆动腿使能。
@@ -51,3 +53,8 @@ q_des, tau_ff, adhesions, servo_enabled = expert.RequestSingleStep(
 ```bash
 python3 -m unittest discover -s src/hex_expert/tests -v
 ```
+
+吸附与释放由两个 expert 内部判断，六腿共用 `magnetic_attach_above`（默认 0.85）
+和 `magnetic_release_below`（默认 0.05）。严格高于前者确认吸附，严格低于后者确认释放；
+中间区和等号边界两者均不确认。阈值通过 runner 各模式 YAML 的 `expert_parameters` 传入，
+分腿 ADC 标定与有效范围只在 magnetic 驱动 YAML 中设置。
