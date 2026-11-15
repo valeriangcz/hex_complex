@@ -1,76 +1,79 @@
 #!/usr/bin/env python3
-"""Inspect a migrated map, robot workspace, or whole-body feasibility scene."""
-
+"""Inspect maps, robot workspaces, or feasibility with independent resource loading."""
 import argparse
 from pathlib import Path
-
 import numpy as np
 from spatialmath import SE3
-
 from hex_kinematic import Kinematic
-from map_robot_voxles import HexState
+from map_robot_voxles import HexState, PointMap, RoboVoxels
 from map_robot_voxles.cache_tools import load_config, resolve_path
 
 
+def load_robot(config_file):
+    config = load_config(config_file)
+    model = Kinematic(urdf_path=resolve_path(config, config['urdf_file']))
+    return RoboVoxels(model, **config.get('robot_voxels', {}),
+                      cache_dir=resolve_path(config, config['cache_dir']),
+                      body_leg_mesh=resolve_path(config, config['body_leg_mesh']),
+                      body_env_mesh=resolve_path(config, config['body_env_mesh']))
+
+
 def make_state(map_config_file, robot_config_file):
-    map_config = load_config(map_config_file)
-    robot_config = load_config(robot_config_file)
-    robot_dir = resolve_path(robot_config, robot_config["cache_dir"])
-    model = Kinematic(urdf_path=resolve_path(robot_config, robot_config["urdf_file"]))
-    return HexState(
-        model,
-        robot_cache_dir=robot_dir,
-        point_map_file=resolve_path(map_config, map_config["point_map_file"]),
-        env_cache_file=resolve_path(map_config, map_config["env_cache_file"]),
-        body_leg_mesh=resolve_path(robot_config, robot_config["body_leg_mesh"]),
-        body_env_mesh=resolve_path(robot_config, robot_config["body_env_mesh"]),
-    )
+    config = load_config(map_config_file)
+    robot = load_robot(robot_config_file)
+    return HexState(robot.kin, robot_voxels=robot,
+                    point_map_file=resolve_path(config, config['point_map_file']),
+                    env_cache_file=resolve_path(config, config['env_cache_file']))
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--map-config", required=True)
-    parser.add_argument("--robot-config", required=True)
-    parser.add_argument("--mode", choices=("map", "robot", "feasibility"), default="feasibility")
-    parser.add_argument("--xyz", nargs=3, type=float, default=(0.0, 0.0, 0.0))
-    parser.add_argument("--rpy-deg", nargs=3, type=float, default=(0.0, 0.0, 0.0))
-    parser.add_argument("--stride", type=int, default=8)
-    parser.add_argument("--off-screen", action="store_true")
-    parser.add_argument("--screenshot", type=Path)
-    args = parser.parse_args()
-
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--map-config')
+    parser.add_argument('--robot-config')
+    parser.add_argument('--mode', choices=('map', 'robot', 'feasibility'), default='feasibility')
+    parser.add_argument('--xyz', nargs=3, type=float, default=(0., 0., 0.))
+    parser.add_argument('--rpy-deg', nargs=3, type=float, default=(0., 0., 0.))
+    parser.add_argument('--stride', type=int)
+    parser.add_argument('--off-screen', action='store_true')
+    parser.add_argument('--screenshot', type=Path)
+    args = parser.parse_args(argv)
+    if args.mode in ('map', 'feasibility') and not args.map_config:
+        parser.error('--map-config is required for '+args.mode)
+    if args.mode in ('robot', 'feasibility') and not args.robot_config:
+        parser.error('--robot-config is required for '+args.mode)
+    if args.stride is not None and args.stride < 1:
+        parser.error('--stride must be positive')
     import pyvista as pv
-    from map_robot_voxles.visualization import (
-        FeasibilityRenderer, MapRenderer, RobotVoxelRenderer,
-    )
-
-    if args.off_screen or args.screenshot is not None:
-        try:
-            pv.start_xvfb()
-        except OSError as exc:
-            raise RuntimeError(
-                "off-screen rendering needs a working DISPLAY or Xvfb; "
-                "install Xvfb or run from a graphical session"
-            ) from exc
-    state = make_state(args.map_config, args.robot_config)
-    transform = SE3.Trans(args.xyz) * SE3.RPY(np.deg2rad(args.rpy_deg), order="xyz")
-    plotter = pv.Plotter(off_screen=args.off_screen or args.screenshot is not None)
-    if args.mode == "map":
-        MapRenderer(plotter).render(state.env_pointsmap_voxels, stride=args.stride)
-    elif args.mode == "robot":
-        RobotVoxelRenderer(plotter).render(
-            state.robot_voxels, transform, leg_stride=args.stride,
-        )
+    from map_robot_voxles.visualization import FeasibilityRenderer, RobotVoxelRenderer
+    off_screen = args.off_screen or args.screenshot is not None
+    if args.mode == 'map':
+        config = load_config(args.map_config)
+        point_map = PointMap(str(resolve_path(config, config['point_map_file'])))
+        # The saved cache may retain a source-project mesh path.
+        point_map.original_file = str(resolve_path(config, config['source_mesh']))
+        point_map.file_type = 'mesh'
+        plotter = point_map.PlotProcessingStages(show=False, off_screen=off_screen)
     else:
-        result = state.RobotFeasiCheck(transform)
-        FeasibilityRenderer(plotter).render(
-            state, transform, result,
-            env_stride=args.stride, leg_voxel_stride=args.stride,
-        )
-    plotter.show_axes()
-    plotter.show_grid()
-    plotter.show(screenshot=str(args.screenshot) if args.screenshot else None)
+        transform = SE3.Trans(args.xyz) * SE3.RPY(np.deg2rad(args.rpy_deg), order='xyz')
+        plotter = pv.Plotter(off_screen=off_screen)
+        if args.mode == 'robot':
+            RobotVoxelRenderer(plotter).render(load_robot(args.robot_config), transform,
+                                              leg_stride=args.stride or 1, style='standalone')
+            plotter.show_grid(xtitle='R x (m)', ytitle='R y (m)', ztitle='R z (m)')
+        else:
+            state = make_state(args.map_config, args.robot_config)
+            FeasibilityRenderer(plotter).render(state, transform, state.RobotFeasiCheck(transform),
+                                               env_stride=args.stride or 8, leg_voxel_stride=args.stride or 8)
+            plotter.show_grid()
+        plotter.show_axes()
+        plotter.view_isometric()
+        plotter.reset_camera()
+    try:
+        plotter.show(screenshot=str(args.screenshot) if args.screenshot else None,
+                     interactive=not off_screen)
+    finally:
+        plotter.close()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

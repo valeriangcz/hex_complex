@@ -2,10 +2,6 @@ workspace_root: ../../..
 map_config: src/map_robot_voxles/config/complex_surface4.yaml
 robot_config: src/map_robot_voxles/config/hex_magnetic.yaml
 output_dir: data/runs/trajectories
-viewer:
-  stride: 16
-  curve_dt: 0.05
-  speed: 1.0
 optimizer:
   presample_count: 51
   sampling_rho_interval: 0.02

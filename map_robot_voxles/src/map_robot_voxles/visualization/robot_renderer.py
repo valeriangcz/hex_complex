@@ -12,22 +12,32 @@ class RobotVoxelRenderer:
     def __init__(self, plotter, prefix="robot"):
         self.layer = ActorLayer(plotter, prefix)
 
-    def render(self, robot_voxels, W_T_R=None, leg_stride=1):
+    def render(self, robot_voxels, W_T_R=None, leg_stride=1, style="feasibility"):
+        if style not in ("feasibility", "standalone"):
+            raise ValueError("unknown robot rendering style")
+        standalone = style == "standalone"
         matrix = np.eye(4) if W_T_R is None else W_T_R
         leg_stride = max(1, int(leg_stride))
         body = robot_voxels.body_voxels
         body_occ = body.esdf_flat_for_env <= 0.0
         self.layer.points(
             "body", transform_points(matrix, body.center[body_occ]),
-            color="orange", point_size=9, opacity=0.65,
+            color="green" if standalone else "orange",
+            point_size=20 if standalone else 9, opacity=0.4 if standalone else 0.65,
         )
-        for index, color in enumerate(LEG_COLORS):
+        if standalone:
+            self.layer.points("body_leg", transform_points(matrix, body.center[body.esdf_flat_for_leg <= 0]),
+                              color="green", point_size=20, opacity=1.0)
+        else:
+            self.layer.remove("body_leg")
+        colors = ("red", "purple", "blue", "yellow", "gray", "cyan") if standalone else LEG_COLORS
+        for index, color in enumerate(colors):
             reachable = robot_voxels.robot_reachable_legs[..., index].any(axis=1)
             points_B = robot_voxels.leg_voxels.center[reachable][::leg_stride]
             points_R = robot_voxels.kin._B2R(points_B.T, index).T
             self.layer.points(
                 "workspace_{}".format(index), transform_points(matrix, points_R),
-                color=color, point_size=4, opacity=0.20,
+                color=color, point_size=20 if standalone else 4, opacity=0.4 if standalone else 0.14,
             )
         return self.layer
 

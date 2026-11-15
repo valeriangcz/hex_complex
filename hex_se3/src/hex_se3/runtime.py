@@ -1,7 +1,6 @@
 """Explicit resource resolution shared by SE(3) command-line applications."""
 
 from pathlib import Path
-import yaml
 
 from hex_kinematic import Kinematic
 from map_robot_voxles import HexState
@@ -10,12 +9,9 @@ from map_robot_voxles.cache_tools import load_config, resolve_path
 
 def load_scene_config(path):
     path = Path(path).expanduser().resolve()
-    with path.open("r", encoding="utf-8") as stream:
-        config = yaml.safe_load(stream) or {}
-    if not isinstance(config, dict):
-        raise ValueError("scene config must be a YAML object")
+    config = load_config(path)
     config["_config_file"] = path
-    config["_workspace_root"] = (path.parent / config.get("workspace_root", ".")).resolve()
+    config["_workspace_root"] = Path(config["_workspace_root"])
     return config
 
 

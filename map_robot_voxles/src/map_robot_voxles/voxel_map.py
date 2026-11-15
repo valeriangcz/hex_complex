@@ -882,7 +882,7 @@ class RoboVoxels:
         from .visualization import RobotVoxelRenderer
         plotter = pv.Plotter() if plotter is None else plotter
         plotter.show_axes()
-        RobotVoxelRenderer(plotter).render(self, leg_stride=leg_stride)
+        RobotVoxelRenderer(plotter).render(self, leg_stride=leg_stride, style="standalone")
         plotter.show_grid(xtitle="R x (m)", ytitle="R y (m)", ztitle="R z (m)")
         if show:
             plotter.show()

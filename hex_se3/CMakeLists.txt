@@ -8,10 +8,12 @@ catkin_package(CATKIN_DEPENDS hex_kinematic map_robot_voxles)
 catkin_install_python(PROGRAMS
   scripts/keyboard_pose_labeler.py
   scripts/optimize_path.py
+  scripts/se3_animation_vis.py
+  scripts/se3_static_vis.py
   scripts/view_path.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-install(DIRECTORY config
+install(DIRECTORY config data
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )

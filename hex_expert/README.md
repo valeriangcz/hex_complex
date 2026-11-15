@@ -58,3 +58,19 @@ python3 -m unittest discover -s src/hex_expert/tests -v
 和 `magnetic_release_below`（默认 0.05）。严格高于前者确认吸附，严格低于后者确认释放；
 中间区和等号边界两者均不确认。阈值通过 runner 各模式 YAML 的 `expert_parameters` 传入，
 分腿 ADC 标定与有效范围只在 magnetic 驱动 YAML 中设置。
+
+## 单腿摆动轨迹查看器
+
+```bash
+source devel/setup.bash
+rosrun hex_expert swing_traj_vis.py
+rosrun hex_expert swing_traj_vis.py --leg-index 3 \
+  --robot-config src/map_robot_voxles/config/hex_magnetic.yaml
+```
+
+`hex_expert.swing_traj_vis` 保留原版 B 系摆腿实验：完整可行体素、初始及优化 B 样条、
+控制点、起终点法向、接触薄片、额外长方体障碍物及优化状态。仅加载机器人工作空间缓存，
+无需地图、逆解或控制器实例；不替换 ExpertComplex 的正式摆腿算法。
+
+模块顶部的 `LEG_CONFIGS` 配置起终点和法向，`SWING_LEG_INDEX` 选择已配置的腿（默认 0，另有 3）。
+缓存路径和网格参数从机器人 YAML 读取并校验。支持 `--off-screen --screenshot /tmp/swing.png`。

@@ -20,8 +20,17 @@ def load_config(config_file):
     config_file = Path(config_file).expanduser().resolve()
     with config_file.open("r", encoding="utf-8") as stream:
         config = yaml.safe_load(stream) or {}
+    if not isinstance(config, dict):
+        raise ValueError("config must be a YAML object")
     workspace_root = config.get("workspace_root", ".")
     workspace_root = (config_file.parent / workspace_root).resolve()
+    # Installed configs keep paths relative to the owning workspace; caches
+    # intentionally remain outside the install tree.
+    if len(config_file.parents) > 2 and config_file.parents[2].name == "share":
+        for parent in config_file.parents:
+            if (parent / ".catkin_workspace").is_file():
+                workspace_root = parent
+                break
     config["_config_file"] = str(config_file)
     config["_workspace_root"] = str(workspace_root)
     return config
