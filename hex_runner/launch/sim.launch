@@ -2,7 +2,7 @@
   <arg name="mode" default="climb"/>
   <arg name="runner_config" default="$(find hex_runner)/config/$(arg mode).yaml"/>
   <arg name="backend_config" default="$(eval find('hex_isaacgym') + '/config/' + ('plane.yaml' if arg('mode') == 'climb' else 'complex_surface4.yaml'))"/>
-  <arg name="device" default=""/>
+  <arg name="device" default="cpu"/>
   <arg name="headless" default="false"/>
   <arg name="publish_clock" default="false"/>
   <arg name="data_root" default=""/>

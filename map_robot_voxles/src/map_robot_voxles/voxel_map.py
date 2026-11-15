@@ -857,7 +857,7 @@ class RoboVoxels:
         np.savez(robot_info_file,
                  robot_reachable_legs=self.robot_reachable_legs,
                  to_bound_dist = self.to_bound_dist)
-        print("-------->save robot_reachable legs to "+robot_info_file)
+        print(f"-------->save robot_reachable legs to {robot_info_file}")
 
     def ReadRobotVoxels(self):
         """直接从文件中加载腿部和身体的体素"""

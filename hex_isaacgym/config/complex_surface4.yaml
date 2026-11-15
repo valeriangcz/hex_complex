@@ -1,4 +1,5 @@
-isaacgym_python: /home/val/Downloads/IsaacGym_Preview_4_Package/isaacgym/python
+# isaacgym_python: /home/val/Downloads/IsaacGym_Preview_4_Package/isaacgym/python
+isaacgym_python: /opt/IsaacGym_Preview_4_Package/isaacgym/python
 device: cpu
 asset:
   robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
