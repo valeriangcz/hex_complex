@@ -17,7 +17,7 @@ motor_torque_limit: 27.0
 robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 expert_parameters:
   magnetic_attach_above: 0.85  # 六腿统一，高于此比例确认吸附
-  magnetic_release_below: 0.05  # 六腿统一，低于此比例确认释放
+  magnetic_release_below: 0.2  # 六腿统一，低于此比例确认释放
   contact_force_threshold: 7.0
   contact_confirm_steps: 10
   contact_velocity_threshold: 0.1  # m/s，连续受压且法向运动接近停止才确认落地
@@ -32,42 +32,45 @@ initial_state:
     position:
       x: 0.0
       y: 0.0
-      z: 0.113
+      z: 0.115
+      # z: 0.3
     orientation:
       x: 0.0
       y: 0.0
       z: 0.0
       w: 1.0
-  stance_group: 0
+  # 腿索引顺序：0=lb, 1=lf, 2=lm, 3=rb, 4=rf, 5=rm
+  groups: [[0, 1, 5], [2, 3, 4]]
+  stance_group: 0  # 初始支撑组，索引 groups
   ik_branch:
+    lb: 1
     lf: 1
     lm: 1
-    lb: 1
+    rb: 1
     rf: 1
     rm: 1
-    rb: 1
   magnetic:
-    lf: true
-    lm: true
     lb: true
-    rf: true
+    lf: true
+    lm: false
+    rb: false
+    rf: false
     rm: true
-    rb: true
   motor_mode: 1
   servo_enabled: true
   # 下面两种初始化方式只能启用一种；切换时将另一种整块注释（含 mode）。
-  # 共同字段 pose、stance_group、ik_branch、magnetic 和使能配置保留。
+  # 共同字段 pose、groups、stance_group、ik_branch、magnetic 和使能配置保留。
   # ik_branch: 0 为 ankle 非负分支，1 为 ankle 负分支；joints 模式须与 ankle 符号一致。
   # foot 不手填：climb=-knee-ankle-pi/2；complex 的 swing 为0，stance 按专家法向计算。
   mode: feet
   frame: leg  # 每条腿自己的局部坐标系，直接作为解析逆解输入
   feet:  # 足端坐标，单位 m；使用上面的 ik_branch 指定分支
-    lf: {x: 0.18, y: -0.08, z: -0.08}
-    lm: {x: 0.19, y: 0, z: -0.08}
     lb: {x: 0.18, y: 0.08, z: -0.08}
-    rf: {x: 0.18, y: 0.08, z: -0.08}
+    lf: {x: 0.18, y: -0.08, z: -0.08}
+    lm: {x: 0.19, y: 0, z: -0.02}
+    rb: {x: 0.18, y: -0.08, z: -0.02}
+    rf: {x: 0.18, y: 0.08, z: -0.02}
     rm: {x: 0.19, y: 0, z: -0.08}
-    rb: {x: 0.18, y: -0.08, z: -0.08}
 
   # 备选方式：以下数值与当前启用的初态等价。切换时整块取消注释。
   # mode: joints

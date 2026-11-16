@@ -214,7 +214,7 @@ class IsaacGymBackend:
             elif joint == "foot":
                 kp[index], kd[index] = 20.0, 0.3
             elif joint in ("ball1", "ball2", "suck"):
-                kp[index], kd[index] = 5.0, 0.1
+                kp[index], kd[index] = 0.0, 0.3
             else:
                 raise ValueError("unexpected physical DOF name: {}".format(name))
         self.kp_np, self.kd_np = kp, kd
@@ -316,7 +316,7 @@ class IsaacGymBackend:
     def set_reference_path(self, points):
         """Store and, when available, draw an ``(N,3)`` reference path."""
         points = np.asarray(points, dtype=np.float32)
-        if points.ndim != 2 or points.shape[1] != 3 or not len(points):
+        if points.ndim != 2 or points.shape[1] != 3:
             raise ValueError("reference path points must have shape (N, 3)")
         if not np.isfinite(points).all():
             raise ValueError("reference path points must be finite")

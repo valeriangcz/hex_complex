@@ -22,13 +22,16 @@ class ExpertClimb:
     """
 
     def __init__(
-        self, kinematic, *, control_dt=0.01, motor_torque_limits=27.0,
+        self, kinematic=None, *, groups, stance_group, control_dt=0.01, motor_torque_limits=27.0,
+        robot_urdf=None, motor_positions=None, foot_positions=None, ik_branch=None, magnetic=None,
         contact_force_threshold=7.0,
         contact_confirm_steps=10, contact_velocity_threshold=0.03,
         torque_blend_time=0.1, stance_height=0.08,
         joint_position_gain=45.0,
         magnetic_attach_above=0.85, magnetic_release_below=0.05,
     ):
+        if kinematic is None:
+            kinematic = Kinematic(urdf_path=robot_urdf)
         if not isinstance(kinematic, Kinematic):
             raise TypeError("kinematic must be hex_kinematic.Kinematic")
         if not hasattr(kinematic, "total_mass"):
@@ -67,7 +70,8 @@ class ExpertClimb:
         self.joint_position_gain = float(joint_position_gain)
         self.torque_blend_steps = max(1, round(torque_blend_time / self.dt))
         self.total_mass = float(kinematic.total_mass)
-        self.groups = np.array([[0, 1, 5], [2, 3, 4]])
+        self.groups = groups
+        self.initial_stance_group = stance_group
         self._swing_start_leg = np.zeros((6, 3))
         self._swing_start_leg[:, 0] = 0.18
         self._swing_start_leg[:, 2] = 0.04
@@ -75,6 +79,14 @@ class ExpertClimb:
         self._swing_start_leg[[0, 4], 1] = 0.08
         self._swing_start_leg[[1, 3], 1] = -0.08
         self.Reset()
+        self.initial_q = None
+        if motor_positions is not None or foot_positions is not None:
+            from .initial_state import climb_initial_joints
+            self.initial_q = climb_initial_joints(self.kin,motor_positions=motor_positions,
+                foot_positions=foot_positions,ik_branch=ik_branch)
+            self.SetInit(self.initial_q)
+            if magnetic is not None:
+                self.adhesions[:] = magnetic
 
     @staticmethod
     def _array(value, shape, name):
@@ -95,7 +107,7 @@ class ExpertClimb:
         self.adhesions = np.zeros(6, dtype=bool)
         self._swing_reached = np.zeros(6, dtype=bool)
         self.contact_count = np.zeros(6, dtype=np.int64)
-        self.stance_group_index = 0
+        self.stance_group_index = self.initial_stance_group
         self.q_des = np.zeros((6, 4))
         self._foot_target_leg = np.zeros((6, 3))
         self.B_e_cur = np.zeros((3, 6))
@@ -121,7 +133,7 @@ class ExpertClimb:
         self.kin.ForwardKin(q_init[:, :3], self._foot_target_leg)
         self.B_e_cur[:] = self._foot_target_leg.T
         self._previous_contact_feet = self._foot_target_leg.copy()
-        self.gaits[self.groups[0]] = True
+        self.gaits[self.groups[self.stance_group_index]] = True
         self.adhesions[:] = self.gaits
         self.set_init = True
 
@@ -171,6 +183,7 @@ class ExpertClimb:
         com = self.kin.ForwardKinAll(q_cur)["R_com"]
         self._ComputeQuasiStaticTauFF(gravity_body, q_cur[:, :3], com)
         self.compute_count += 1
+        print("compute single step")
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     def _ContactDetection(self, q_cur, q_torque):
@@ -194,8 +207,8 @@ class ExpertClimb:
                    & (np.abs(self.normal_foot_velocity) <= self.contact_velocity_threshold)
                    & ~self.gaits & self._swing_reached)
         #为了方便调试，加入使用高度判断的落地检测
-        contact |= (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
-        
+        # contact |= (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
+
         # Scattered dynamic-load spikes must not accumulate into a false landing.
         self.contact_count[~contact] = 0
         self.contact_count[contact] += 1
@@ -235,6 +248,11 @@ class ExpertClimb:
         if np.all(swing | (workspace & clearance)):
             self._foot_target_leg[self.gaits, :2] = next_targets[self.gaits, :2]
 
+        #为了便于调试，在没有电磁铁反馈的时候，直接设置吸附和释放为真
+        # if self.gaits.all():
+        #     confirmed_attached.fill(1)
+        #     confirmed_released.fill(1)
+        
         new_group = self.groups[1 - self.stance_group_index]
         old_group = self.groups[self.stance_group_index]
         if np.all((confirmed_attached & self.gaits)[new_group]):

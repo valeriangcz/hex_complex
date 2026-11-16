@@ -14,8 +14,9 @@ def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--device',default='cpu')
     parser.add_argument('--report',type=Path)
+    parser.add_argument('--to-sim-info',type=Path,required=True)
     args=parser.parse_args()
-    config=SimulationConfig.from_yaml(Path(rospkg.RosPack().get_path('hex_isaacgym'))/'config/plane.yaml',args.device,Path(rospkg.RosPack().get_path('hex_runner'))/'config/climb.yaml')
+    config=SimulationConfig.from_yaml(Path(rospkg.RosPack().get_path('hex_isaacgym'))/'config/plane.yaml',args.device,args.to_sim_info)
     initial=config.initial_state
     magnets=np.array([True,False,True,False,False,True])
     with IsaacGymBackend(config.backend,headless=True,initial_state=initial) as backend:

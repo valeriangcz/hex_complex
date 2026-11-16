@@ -20,15 +20,15 @@
 ```bash
 source devel/setup.bash
 # 默认启动当前 launch 配置的 joy_node
-roslaunch control_stick climb.launch
+roslaunch control_stick joy_ctrl.launch
 # 已有 joy_node 时，避免重复启动
-roslaunch control_stick climb.launch start_joy:=false
+roslaunch control_stick joy_ctrl.launch start_joy:=false
 # 自定义私有ROS参数配置
-roslaunch control_stick climb.launch config:=/absolute/path/climb.yaml
+roslaunch control_stick joy_ctrl.launch config:=/absolute/path/joy_ctrl.yaml
 ```
 
 配套启动仿真或实物 runner。反馈就绪后按button 1初始化，再推动摇杆。
-config/climb.yaml 定义 joy_topic、发布频率、三个轴索引和六个按钮索引。
+config/joy_ctrl.yaml 定义 joy_topic、发布频率、三个轴索引和六个按钮索引。
 默认20Hz发布原始轴数值，不做速度缩放、扳机转换或额外死区处理。
 实际速度只由 hex_runner/config/climb.yaml 中 velocity_scales 决定。
 例如原始vx=0.5、velocity_scales.vx=0.02，runner计算实际vx=0.01 m/s。
@@ -59,7 +59,7 @@ runner 同样保留最新有效速度，即使手柄节点停止发布也不会�
 
 ```bash
 python3 -m unittest discover -s src/control_stick/tests -v
-python3 src/control_stick/scripts/test_climb_joy.py
+python3 src/control_stick/scripts/test_joy_ctrl.py
 python3 src/hex_runner/scripts/test_ros_integration.py --backend fake --mode complex --joystick
 ```
 
@@ -78,7 +78,7 @@ roslaunch hex_runner sim.launch mode:=climb device:=cpu headless:=true
 roslaunch hex_runner runner.launch mode:=climb
 ```
 
-runner 服务注册后，reset 仍要求有效设备反馈。只有 joy_node 和 climb_joy 时没有设备反馈来源。
+runner 服务注册后，reset 仍要求有效设备反馈。只有 joy_node 和 joy_ctrl 时没有设备反馈来源。
 get_loggers、set_logger_level 是 ROS 自动提供的日志级别管理服务，不是机器人控制服务。
 rospy没有公开的init_node参数禁用这两个服务；disable_rosout只影响日志话题，不取消服务。
 不修改系统ROS或第三方joy/rosout节点来删除它们。只看业务服务可使用：
@@ -101,12 +101,12 @@ velocity_scales:
 本包只负责轴和按钮索引、消息转发频率，不再包含速度缩放或joy_timeout。
 `hex/cmd_vel` 保留 geometry_msgs/Twist 类型，但数值现在表示原始轴输入，不是m/s或rad/s。
 runner收到后乘velocity_scales，内部专家仍使用m/s、rad/s；负缩放用于轴反向。
-修改velocity_scales后重启runner，修改手柄映射后重启climb_joy。
+修改velocity_scales后重启runner，修改手柄映射后重启joy_ctrl。
 complex的v_max/w_max是轨迹规划上限，舵机speed是设备参数，不属于这份climb速度指令。
 
 ## complex 的 start / pause
 
-先启动 complex runner，再运行同一个 control_stick/climb.launch。
+先启动 complex runner，再运行同一个 control_stick/joy_ctrl.launch。
 按钮1 reset，按钮0 start；按钮4 pause，随后再按按钮0继续原进度。
 长按不重复调用，松开后再次按下才触发；complex 忽略摇杆速度。
 climb 的 start/pause 服务仍返回“不适用”，climb 通过非零/零速度运行和保持。

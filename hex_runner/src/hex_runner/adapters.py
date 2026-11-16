@@ -3,46 +3,49 @@ import numpy as np
 from scipy.spatial.transform import Rotation
 from spatialmath import SE3
 from hex_expert import ExpertClimb, ExpertComplex
-from hex_kinematic import Kinematic
+from hex_kinematic.sim_info import write_sim_info
 
 
 class ExpertAdapter:
     def __init__(self, config):
         self.config = config
-        self.kin = Kinematic(urdf_path=config.robot_urdf)
-        self.path = ()
-        self.expert = None
-        self.switch_count = 0
+        initial = config.initial_state
+        common = dict(robot_urdf=config.robot_urdf,groups=initial.groups,
+                      stance_group=initial.stance_group,control_dt=config.control_dt,
+                      motor_torque_limits=config.motor_torque_limit,
+                      ik_branch=initial.ik_branch,magnetic=initial.magnetic,
+                      **config.expert_parameters)
         if config.expert_type == "complex":
-            from hex_se3 import load_trajectory
-            from map_robot_voxles import HexState
-            resources = config.resources
-            document = load_trajectory(resources["se3_path"])
-            self.path = tuple(document.dense.poses if document.dense is not None else document.waypoints)
-            self.hex_state = HexState(self.kin, **{name: resources[name] for name in (
-                "robot_cache_dir", "point_map_file", "env_cache_file", "body_leg_mesh", "body_env_mesh")})
+            self.expert = ExpertComplex(resources=config.resources,
+                                       initial_pose=SE3(initial.W_T_R),**common)
+        else:
+            self.expert = ExpertClimb(motor_positions=initial.motor_positions,
+                                     foot_positions=initial.foot_positions,**common)
+        self.switch_count = 0
+        self.export_sim_info()
+
+    def export_sim_info(self):
+        initial = self.config.initial_state
+        path = (self.expert.path_se3 if self.config.expert_type == "complex" else [])
+        write_sim_info(self.config.to_sim_info,dict(
+            expert_type=self.config.expert_type,robot_urdf=str(self.config.robot_urdf),
+            initial_state=dict(
+                W_T_R=initial.W_T_R.tolist(),q=self.expert.q_des.tolist(),
+                magnetic=self.expert.adhesions.tolist(),motor_mode=initial.motor_mode,
+                servo_enabled=initial.servo_enabled),
+            reference_path=[pose.t.tolist() for pose in path]))
 
     def reset(self, feedback):
-        cfg = self.config
-        if cfg.expert_type == "climb":
-            self.expert = ExpertClimb(self.kin, control_dt=cfg.control_dt,
-                                      motor_torque_limits=cfg.motor_torque_limit, **cfg.expert_parameters)
-            self.expert.SetInit(cfg.initial_state.q.copy())
+        initial = self.config.initial_state
+        if self.config.expert_type == "complex":
+            self.expert.SetInitBySE3(ik_branch=initial.ik_branch,initial_pose=SE3(initial.W_T_R))
         else:
-            self.expert = ExpertComplex(self.kin, self.hex_state, control_dt=cfg.control_dt, **cfg.expert_parameters)
-            self.expert.motor_torque_limits[:] = cfg.motor_torque_limit
-            self.expert.LoadSE3(list(self.path))
-            self.expert.SetInit(cfg.initial_state.q.copy())
-        from hex_kinematic.initial_state import STANCE_GROUPS
-        initial = cfg.initial_state
-        self.expert.stance_group_index = initial.stance_group
-        self.expert.gaits[:] = [leg in STANCE_GROUPS[initial.stance_group] for leg in self.expert.leg_names]
-        if hasattr(self.expert, "last_gaits"):
-            self.expert.last_gaits[:] = self.expert.gaits
+            self.expert.SetInit(self.expert.initial_q)
         self.expert.adhesions[:] = initial.magnetic
-        if hasattr(self.expert, "q3_branches"):
-            self.expert.q3_branches[:] = initial.ik_branch
         self.switch_count = 0
+        self.export_sim_info()
+        return (self.expert.q_des.copy(),self.expert.tau_ff.copy(),
+                self.expert.adhesions.copy(),np.ones(6,dtype=bool))
 
     def compute(self, feedback, velocity):
         old_group = self.expert.stance_group_index
@@ -54,17 +57,18 @@ class ExpertAdapter:
         return result
 
     def failure_reason(self, feedback):
-        if self.path:
-            distance = np.min(np.linalg.norm(np.array([pose.t for pose in self.path]) - feedback.pose[:3, 3], axis=1))
+        if self.config.expert_type == "complex":
+            distance = np.min(np.linalg.norm(np.array([pose.t for pose in self.expert.path_se3]) - feedback.pose[:3, 3], axis=1))
             if distance > self.config.failure_path_distance:
                 return "base is %.3f m from reference path" % distance
         return ""
 
     def is_complete(self, feedback):
-        if not self.path:
+        if self.config.expert_type != "complex":
             return False
-        delta = self.path[-1].inv().A @ feedback.pose
-        reached = len(self.path) == 1 or self.expert._GetCloestIndex(SE3(feedback.pose, check=False)) == len(self.path) - 1
+        path = self.expert.path_se3
+        delta = path[-1].inv().A @ feedback.pose
+        reached = len(path) == 1 or self.expert._GetCloestIndex(SE3(feedback.pose, check=False)) == len(path) - 1
         no_swing = not self.expert.B_e_traj or np.all(
             self.expert.q_traj_index >= np.maximum(self.expert.B_e_traj_len - 1, 0))
         return (reached and no_swing and np.linalg.norm(delta[:3, 3]) <= self.config.completion_translation
@@ -75,7 +79,7 @@ class ExpertAdapter:
             return {}
         value = {"gaits": self.expert.gaits.tolist(), "adhesions": self.expert.adhesions.tolist(),
                  "gait_switch_count": self.switch_count}
-        if self.path:
+        if self.config.expert_type == "complex":
             value["follow_path_index"] = self.expert.follow_path_index
         else:
             value.update(

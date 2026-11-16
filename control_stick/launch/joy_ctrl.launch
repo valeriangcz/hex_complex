@@ -1,6 +1,6 @@
 <launch>
-  <arg name="config" default="$(find control_stick)/config/climb.yaml"/>
-  <node pkg="control_stick" type="climb_joy_node.py" name="climb_joy" clear_params="true" output="screen" required="true">
+  <arg name="config" default="$(find control_stick)/config/joy_ctrl.yaml"/>
+  <node pkg="control_stick" type="joy_ctrl_node.py" name="joy_ctrl" clear_params="true" output="screen" required="true">
     <rosparam command="load" file="$(arg config)"/>
   </node>
   <arg name="start_joy" default="true"/>

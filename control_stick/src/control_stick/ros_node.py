@@ -13,7 +13,7 @@ OVERRIDE_ACTIONS = ("disable_actuators", "release_magnets")
 NORMAL_ACTIONS = ("sim_reset", "reset", "pause", "start")
 
 
-class ClimbJoyNode:
+class JoyCtrlNode:
     def __init__(self):
         self.config = StickConfig(
             joy_topic=rospy.get_param('~joy_topic', '/joy'),
@@ -100,5 +100,5 @@ class ClimbJoyNode:
 
 
 def main():
-    rospy.init_node('climb_joy')
-    ClimbJoyNode().spin()
+    rospy.init_node('joy_ctrl')
+    JoyCtrlNode().spin()

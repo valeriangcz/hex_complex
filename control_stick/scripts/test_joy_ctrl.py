@@ -58,7 +58,7 @@ def main():
                 from magnetic.msg import MagneticCmd
                 from std_srvs.srv import SetBool, Trigger, TriggerResponse
                 from hex_kinematic.ros_contract import read_magnetic
-                rospy.init_node('climb_joy_test',disable_signals=True)
+                rospy.init_node('joy_ctrl_test',disable_signals=True)
                 latest={};outputs={};velocities=[]
                 sim_resets=[]
                 def sim_reset(_request):
@@ -74,7 +74,7 @@ def main():
                 for name,typ in [('motor',MultiLegCommand),('servo',servo_cmd),('magnetic',MagneticCmd)]:
                     subscribers.append(rospy.Subscriber('hex/'+name+'/command',typ,lambda msg,n=name:outputs.update({n:msg})))
                 start(['rosrun','hex_runner','runner_node.py','--config',str(workspace/'src/hex_runner/config/climb.yaml')])
-                start(['roslaunch','control_stick','climb.launch','start_joy:=false'])
+                start(['roslaunch','control_stick','joy_ctrl.launch','start_joy:=false'])
                 joy=rospy.Publisher('/joy',Joy,queue_size=1)
                 wait_for(lambda:joy.get_num_connections()>0 and latest.get('phase')=='WAITING','joystick and runner startup')
                 assert not outputs,'startup emitted device commands'

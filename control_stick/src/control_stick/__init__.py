@@ -1,1 +1,1 @@
-"""Climb joystick input handling, independent of physical device drivers."""
+"""Joystick input handling, independent of physical device drivers."""

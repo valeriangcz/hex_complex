@@ -21,11 +21,13 @@ def se3_vee(Xi:np.ndarray):
 
 class ExpertComplex:
     """
-    需要调用 LoadSE3(path:List[SE3])才能完成初始化
+    先调用 LoadSE3(path)，再调用 SetInitBySE3() 根据环境完成初始化
     """
-    def __init__(self,kinematic:Kinematic,hex_state:HexState,singularity_threshold=0.02,
+    def __init__(self,kinematic:Kinematic=None,hex_state:HexState=None,singularity_threshold=0.02,
                  control_dt=0.01,v_max=0.08,w_max=0.2,stance_maxmove_t=0.2,stance_maxmove_w=0.4,
-                 magnetic_attach_above=0.85,magnetic_release_below=0.05):
+                 magnetic_attach_above=0.85,magnetic_release_below=0.05, *, groups, stance_group,
+                 robot_urdf=None,resources=None,initial_pose=None,ik_branch=None,magnetic=None,
+                 motor_torque_limits=27.0):
         # self.body_offset_x = 0.1
         # self.body_offset_y = 0.22
         # self.body_shape=np.zeros((3,6))
@@ -44,6 +46,11 @@ class ExpertComplex:
         self._stance_maxmove_w = stance_maxmove_w #rad
 
         self.hold_q = np.zeros((6,),dtype=np.float32) #记录第一次进入奇异点值对应的真实关节角
+        if kinematic is None:
+            kinematic = Kinematic(urdf_path=robot_urdf)
+        if hex_state is None:
+            hex_state = HexState(kinematic,**{name: resources[name] for name in (
+                "robot_cache_dir","point_map_file","env_cache_file","body_leg_mesh","body_env_mesh")})
         if not isinstance(kinematic,Kinematic):
             raise TypeError("kinematic must be hex_kinematic.Kinematic")
         if not isinstance(hex_state,HexState):
@@ -68,9 +75,9 @@ class ExpertComplex:
         self.interp_path_T: List|np.array = [] #放入N*4*4的interp_path_se3，便于_Cal_Cost的时候批量计算
         self.set_init = False
         #三角步态分组
-        self.groups = [[0,1,5],[2,3,4]]
-        # self.groups = [[2,3,4],[0,1,5]]
-        self.stance_group_index = 0
+        self.groups = groups
+        self.initial_stance_group = stance_group
+        self.stance_group_index = self.initial_stance_group
         self.gaits[self.groups[self.stance_group_index]]=1
         self.last_gaits = self.gaits.copy()
         self._swing_t = 1.2
@@ -98,7 +105,7 @@ class ExpertComplex:
         # 准静态支撑前馈：在机身 R 系中分配接触力，再映射到各腿局部 Jacobian。
         self.total_mass = self.kin.total_mass
         self.world_gravity = np.array([0.0,0.0,-9.81],dtype=np.float64)
-        self.motor_torque_limits = np.full((6,3),27.0,dtype=np.float64)
+        self.motor_torque_limits = np.broadcast_to(np.asarray(motor_torque_limits,dtype=float),(6,3)).copy()
         self.tau_ff = np.zeros((6,3),dtype=np.float32)
         self.static_contact_forces_R = np.zeros((6,3),dtype=np.float32)
         self._tau_ff_support_mask = np.zeros(6,dtype=np.bool_)
@@ -118,19 +125,45 @@ class ExpertComplex:
         else:
             raise AttributeError("Current NumPy version provides neither 'trapezoid' nor 'trapz'; ")
 
-    def SetInit(self,q_init:np.ndarray)->Tuple[np.ndarray,np.ndarray]:
+        if resources is not None:
+            from hex_se3 import load_trajectory
+            document = load_trajectory(resources["se3_path"])
+            self.LoadSE3(list(document.dense.poses if document.dense is not None else document.waypoints))
+        if initial_pose is not None:
+            self.SetInitBySE3(ik_branch=ik_branch,initial_pose=initial_pose)
+            if magnetic is not None:
+                self.adhesions[:] = magnetic
+
+    def LoadSE3(self,path_se3:List[SE3]):
+        if not isinstance(path_se3,(list,tuple)) or not path_se3:
+            raise ValueError("path_se3 must be a nonempty sequence of SE3 poses")
+        if any(not isinstance(pose,SE3) or not np.isfinite(pose.A).all() for pose in path_se3):
+            raise ValueError("path_se3 must contain only finite spatialmath.SE3 poses")
+        self.path_se3 = [pose.copy() for pose in path_se3]
+        self.follow_path_index = 0
+        self.interp_path_se3.clear()
+        self.interp_path_T = []
+        self._path_positions = np.array([pose.t for pose in self.path_se3])
+        self._path_rotations = np.array([pose.R for pose in self.path_se3])
+
+    def SetInitBySE3(self,attached:np.ndarray|None=None,*,ik_branch=None,initial_pose:SE3|None=None):
+        """清空运行状态，并按环境、初始机身位姿和指定分支选择支撑落脚点。
+
+        initial_pose 默认为参考路径首个位姿。未传入实际 attached 反馈时，
+        前馈保持为零，直到 RequestSingleStep 收到传感器反馈。
         """
-        q_init 6,4，按照leg_names排列的
-        @output q_des 6,4 角度期望值, adhesions 6吸附状态
-        """
-        #设置末端位置初始值和最开始的轨迹
-        # self.kin.ForwardKin(q_init,self.B_e_init.T)
-        q_init = np.asarray(q_init,dtype=np.float32)
-        if q_init.shape != (6,4) or not np.isfinite(q_init).all():
-            raise ValueError("q_init must be a finite array with shape (6,4)")
-        self.q_des = q_init.copy()
+        if not self.path_se3:
+            raise RuntimeError("Use LoadSE3 before SetInitBySE3")
+        pose = self.path_se3[0] if initial_pose is None else initial_pose
+        if not isinstance(pose,SE3) or not np.isfinite(pose.A).all():
+            raise ValueError("initial_pose must be a finite SE3 pose")
+        branches = self.q3_branches.copy() if ik_branch is None else np.asarray(ik_branch)
+        if branches.shape != (6,) or not np.isin(branches,[0,1]).all():
+            raise ValueError("ik_branch must contain six values in {0, 1}")
+        self.set_init = False
+        self.q_des.fill(0.0)
         #设置腿部步态初始值
-        self.stance_group_index = 0
+        self.stance_group_index = self.initial_stance_group
         self.gaits.fill(0)
         self.gaits[self.groups[self.stance_group_index]] = 1
         self.adhesions.fill(0)
@@ -153,93 +186,59 @@ class ExpertComplex:
         self.singularity_legs.fill(False)
         self.hold_q.fill(0.0)
         self.contact_count.fill(0)
-        self.q3_branches.fill(1)
+        self.q3_branches[:] = branches
         self.follow_path_index = 0
         self.interp_path_se3.clear()
         self.interp_path_T = []
         self.B_e_cur.fill(0.0)
         self.landing_point.fill(0.0)
         self.W_landing_points.fill(0.0)
-        self.set_init = True
 
-        return self.q_des, self.adhesions
-
-    def LoadSE3(self,path_se3:List[SE3]):
-        if not isinstance(path_se3,(list,tuple)) or not path_se3:
-            raise ValueError("path_se3 must be a nonempty sequence of SE3 poses")
-        if any(not isinstance(pose,SE3) or not np.isfinite(pose.A).all() for pose in path_se3):
-            raise ValueError("path_se3 must contain only finite spatialmath.SE3 poses")
-        self.path_se3 = [pose.copy() for pose in path_se3]
-        self.follow_path_index = 0
-        self.interp_path_se3.clear()
-        self.interp_path_T = []
-        self._path_positions = np.array([pose.t for pose in self.path_se3])
-        self._path_rotations = np.array([pose.R for pose in self.path_se3])
-
-    def Reset(self,q_init:np.ndarray|None=None,keep_path:bool=True):
-        """Reset all controller runtime state without rebuilding map/model caches."""
-        kinematic = self.kin
-        hex_state = self.hex_state
-        path = [pose.copy() for pose in self.path_se3] if keep_path and self.path_se3 else None
-        threshold = self.singularity_threshold
-        self.__init__(kinematic,hex_state,threshold)
-        if path is not None:
-            self.LoadSE3(path)
-        if q_init is not None:
-            self.SetInit(q_init)
-        return self
-
-    # reset = Reset
-
-    def SetInitBySE3(self):
-        """
-        根据加载的se3的初值对每个脚设置初始位置
-        """
-        if len(self.path_se3)==0:
-            raise RuntimeError("Use self.LoadSE3 before SetInitBySE3!!!")
-        self.SetInit(np.zeros((6,4)))
-        _,landing_idx,body_free,leg_feasi = self.hex_state.RobotFeasiCheck(self.path_se3[0])
-        if (~body_free).any():
-            raise RuntimeWarning("The body collide with env at path_se3[0] please check the path")
-        #对每个支撑腿，选择一个最中心的落脚点
+        _,landing_idx,body_free,leg_feasi = self.hex_state.RobotFeasiCheck(pose)
+        if not body_free.all():
+            raise RuntimeError("Body collides with environment at initial pose")
         point_map = self.hex_state.env_pointsmap_voxels
-        B_init_points=[]
-        # B_init_norms = []
-        for i in range(6):
-            if self.gaits[i]:
-                # 6,landing_num,2
-                lp_points_idx = landing_idx[leg_feasi[i,:,self.q3_branches[i]]]
-                #R2B W_T_R.inv() * w_points
-                #N,3
-                B_points = self.kin._R2B(self.path_se3[0].inv()*point_map.landing_points[lp_points_idx].T,i).T
-                #N,3
-                B_norms = (self.path_se3[0].R.T @ point_map.normals[lp_points_idx].T).T
-                if i<3:
-                    B_norms[:,:2] = -1*B_norms[:,:2]
-                #在腿部的voxels下点在体素的索引
-                leg_flat_idx=self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
-                best_in_leg_idx = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[leg_flat_idx,i])
-                #为了避免初始状态就碰撞，设置距离落脚点原理平面1mm的位置 避免初始条件使机器人碰撞
-                self.B_landing_n[:,i] = B_norms[best_in_leg_idx]
-                B_init_points.append(B_points[best_in_leg_idx]+B_norms[best_in_leg_idx]*0.001)
-            else:
-                B_init_points.append(np.array([0.18,0.0,0.0]))
-        #N,3
-        B_init_points = np.column_stack(B_init_points)
-        print(B_init_points.shape)
-        joints,mask = self.kin.InverseKin2MultiBatch(B_init_points.T)
-        if mask[np.arange(6),self.q3_branches].all():
-            self.q_des[:,:3] = joints[np.arange(6),self.q3_branches,:]
-            self.q_des[:,3] = self._GetFootAngle(self.q_des[:,:3],B_init_points)
-        else:
-            print("current pos\n",B_init_points)
-            print("current branch\n",self.q3_branches)
-            raise ValueError("Current pos and branch can not be solved")
+        #swing 腿部会保持这个位置，stance会根据se3计算期望的落脚点
+        # 非支撑腿使用两种 IK 分支均可达的收腿参考位，不将其作为落脚点。
+        B_init_points = np.tile(np.array([[self.kin.l1+self.kin.l2],[0.0],[0.0]]),(1,6))
+        for leg_index in np.flatnonzero(self.gaits):
+            candidates = landing_idx[leg_feasi[leg_index,:,self.q3_branches[leg_index]]]
+            if candidates.size == 0:
+                raise RuntimeError(
+                    f"No feasible initial landing point for {self.leg_names[leg_index]} "
+                    f"in IK branch {self.q3_branches[leg_index]}"
+                )
+            B_points = self.kin._R2B(pose.inv()*point_map.landing_points[candidates].T,leg_index).T
+            flat_indices = self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
+            best = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[flat_indices,leg_index])
+            normal = self.kin.RVectorToLeg(
+                (pose.R.T@point_map.normals[candidates[best]])[:,None],leg_index
+            ).ravel()
+            self.B_landing_n[:,leg_index] = normal
+            self.B_support_n[:,leg_index] = normal
+            # 沿环境法向偏移 1 mm，避免初始足端穿入接触面。
+            B_init_points[:,leg_index] = B_points[best]+normal*0.001
+            self.W_landing_points[:,leg_index] = point_map.landing_points[candidates[best]]
+
+        joints,valid = self.kin.InverseKin2MultiBatch(B_init_points.T)
+        if not valid[np.arange(6),self.q3_branches].all():
+            raise ValueError("Initial foot positions cannot be solved in the requested IK branches")
+        self.q_des[:,:3] = joints[np.arange(6),self.q3_branches]
+        limits = np.stack([
+            np.vstack((self.kin.joints_limits_thigh[i],self.kin.joints_limits_rest))
+            for i in range(6)
+        ])
+        if ((self.q_des[:,:3] < limits[:,:,0]-1e-6) | (self.q_des[:,:3] > limits[:,:,1]+1e-6)).any():
+            raise ValueError("Environment-selected initial joint angles exceed joint limits")
+        foot_angles = self._GetFootAngle(self.q_des[:,:3],B_init_points)
+        self.q_des[self.gaits,3] = foot_angles[self.gaits]
+        self.landing_point[:] = B_init_points
         fk_result = self.kin.ForwardKinAll(self.q_des)
         self.B_e_cur[:] = fk_result["B_foot"].T
-        self._ComputeQuasiStaticTauFF(self.path_se3[0],self.q_des[:,:3],fk_result["R_com"])
-        return self.q_des,self.tau_ff,self.adhesions
-        
+        if attached is not None:
+            self._ComputeQuasiStaticTauFF(pose,self.q_des[:,:3],fk_result["R_com"],attached)
+        self.set_init = True
+        return self.q_des.copy(),self.tau_ff.copy(),self.adhesions.copy()
 
     def RequestSingleStep(self, cur_se3:SE3,q_cur:np.ndarray,q_torque:np.ndarray,attached:np.ndarray)->Tuple[np.ndarray,np.ndarray,np.ndarray,np.ndarray]:
         """
@@ -251,7 +250,7 @@ class ExpertComplex:
         if self.path_se3 == None:
             raise ValueError("path_se3 is None, please use LoadSE3(path_se3) first")
         if not self.set_init:
-            raise RuntimeError("Please set init state of robot first by SetInit(q_init)")
+            raise RuntimeError("Please initialize the robot with SetInitBySE3() first")
         fk_result = self.kin.ForwardKinAll(q_cur)
         q_motor = q_cur[:,:3]
         self.B_e_cur[:] = fk_result["B_foot"].T
@@ -260,7 +259,7 @@ class ExpertComplex:
             raise ValueError("attached must contain six finite ratios in [0, 1]")
         self.GaitPlanning(cur_se3,q_motor,q_torque,attached) #更新步态，更新B_e_des_traj
         self.GetJointAngles(q_motor)# 根据当前角度和期望执行的B_e_des计算目标角度
-        self._ComputeQuasiStaticTauFF(cur_se3,q_motor,fk_result["R_com"])
+        self._ComputeQuasiStaticTauFF(cur_se3,q_motor,fk_result["R_com"],attached)
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     @staticmethod
@@ -273,7 +272,7 @@ class ExpertComplex:
             [-y,x,0.0],
         ],dtype=np.float64)
 
-    def _ComputeQuasiStaticTauFF(self,cur_se3:SE3,q_cur:np.ndarray,R_com:np.ndarray)->np.ndarray:
+    def _ComputeQuasiStaticTauFF(self,cur_se3:SE3,q_cur:np.ndarray,R_com:np.ndarray,attached:np.ndarray)->np.ndarray:
         """计算并平滑当前实际支撑腿的准静态关节前馈扭矩。
 
         ``B_e_cur`` 和 ``Jacobian`` 都在各腿局部系；接触力分配在机身 R
@@ -291,9 +290,13 @@ class ExpertComplex:
         forces_R = np.zeros((6,3),dtype=np.float64)
         R_WR = np.asarray(cur_se3.R,dtype=np.float64).reshape(3,3)
         gravity_R = R_WR.T@self.world_gravity
-        # ``gaits`` 表示规划上的 stance；只有同时处于吸附状态的腿才能
-        # 参与物理支撑力分配。释放命令发出后，旧腿立即转为摆动重力补偿。
-        support_mask = self.gaits & self.adhesions
+        # 与步态判断使用相同的 float32 反馈精度和严格大于阈值的判据。
+        attached = np.asarray(attached,dtype=np.float32)
+        if attached.shape != (6,) or not np.isfinite(attached).all() or ((attached < 0) | (attached > 1)).any():
+            raise ValueError("attached must contain six finite ratios in [0, 1]")
+        # stance、吸附命令和实际吸附确认必须同时成立才参与支撑力分配。
+        # 释放命令发出后，旧腿立即转为摆动重力补偿。
+        support_mask = self.gaits & self.adhesions & (attached > self.magnetic_attach_above)
         swing_mask = ~support_mask
         support_indices = np.flatnonzero(support_mask)
         if support_indices.size >= 3:
@@ -387,7 +390,8 @@ class ExpertComplex:
             self._SwingTrajCal(cur_se3,self.interp_path_se3[-1])
 
         #判断swing当前轨迹索引，并进行接触检测
-        swing_dones = self._ContactDetection(q_cur,q_torque) #6维，stance腿也为False
+        # 只有摆动腿能触发新落地事件，已吸附的支撑腿必须保留正在执行的轨迹。
+        swing_dones = (~self.gaits) & (self._ContactDetection(q_cur,q_torque) | confirmed_attached)
         #判断当前已经执行的轨迹长度
         execute_done_mask = self.q_traj_index == self.B_e_traj_len -1 
         swing_continue = ~swing_dones & ~self.gaits & ~execute_done_mask
@@ -533,7 +537,7 @@ class ExpertComplex:
 
     def _GetFootAngle(self, q: np.ndarray, B_e: np.ndarray) -> np.ndarray:
         """Return finite foot angles in radians; enable flags are returned separately."""
-        from hex_kinematic.initial_state import complex_foot_angles
+        from hex_expert.initial_state import complex_foot_angles
         return complex_foot_angles(self.kin, q[:, :3], B_e.T, self.B_landing_n.T)
 
     def _WrapAngleError(self,target:np.ndarray,current:np.ndarray)->np.ndarray:
@@ -1297,91 +1301,60 @@ class ExpertComplex:
         _,lp_idx,body_cf_masks,lp_mask = self.hex_state.RobotFeasiCheck(target_se3)
         if (~body_cf_masks).any():
             print(">>>>>>>>>> In Swing Traj Cal, body collisions occurs sum(body_collision_mask)=",sum(~body_cf_masks))
-        future_path_se3,_ = self._Start2PathSE3Interp(target_se3)
-        if not len(future_path_se3)>1:
+        # 仅保留当前 IK 分支；候选点索引始终固定在落地位姿选出的集合中。
+        branches = self.q3_branches.copy()
+        candidate_mask = lp_mask[np.arange(6),:,branches].copy()
+
+        # 腿间碰撞只在落地位姿检查，与当前支撑腿轨迹终点的配置比较。
+        if stance_index.size:
+            B_stance_points = np.column_stack([self.B_e_traj[leg_index][:,-1] for leg_index in stance_index])
+            target_R_stance_points = self.kin._B2R(B_stance_points,stance_index).T
             for leg_index in swing_index:
-                traj = self._QuinticInterp(self.B_e_cur[:,leg_index],np.zeros((3,)),np.zeros((3,)),
-                                            np.array([0.18,0,0]),np.zeros((3,)),np.zeros((3,)),
-                                            self._swing_t,
-                                            np.arange(0,self._swing_t,0.01))
-                self.B_e_traj[leg_index] = traj
-                self.B_e_traj_len[leg_index] = traj.shape[1]
+                leg_mask = candidate_mask[leg_index].copy()
+                if not leg_mask.any():
+                    continue
+                possible_points = (target_se3.inv() * self.hex_state.env_pointsmap_voxels.landing_points[lp_idx[leg_mask]].T).T
+                collision_free = self.hex_state._LegLegCollisionFree(
+                    possible_points,target_R_stance_points,branches[stance_index],leg_index,stance_index
+                )
+                candidate_mask[leg_index,leg_mask] &= collision_free[:,branches[leg_index]]
+
+        min_candidates = 3
+        candidate_counts = candidate_mask[swing_index].sum(axis=1)
+        if (candidate_counts < min_candidates).any():
+            details = ", ".join(
+                f"{self.leg_names[leg_index]}(branch={branches[leg_index]}, count={count})"
+                for leg_index,count in zip(swing_index,candidate_counts)
+            )
+            print(">>>>>>> WARNING: fewer than 6 initial landing candidates in current branch; "
+                  f"holding all swing legs at current points: {details}")
+            # _ClearTraj 已将全部摆动腿设置为当前点的单点轨迹。
             return
 
-        #用于计算摆动腿部碰撞
-        B_stance_points = np.column_stack([self.B_e_traj[leg_index][:,-1] for leg_index in stance_index])
-        target_R_stance_points = self.kin._B2R(B_stance_points,stance_index).T #N,3
-
-        #从当前向未来反推
-        for i in range(len(future_path_se3)-1,-1,-20):
-            #未来位姿只用于筛选可行落脚点
+        future_path_se3,_ = self._Start2PathSE3Interp(target_se3)
+        for i in range(20,len(future_path_se3),20):
             _,future_lp_idx,_,future_lp_mask = self.hex_state.RobotFeasiCheck(future_path_se3[i],lp_idx)
-            future_lp_mask = future_lp_mask&lp_mask
-            swing_has_lps_mask = future_lp_mask.any(axis=-1)
-            if not (np.sum(swing_has_lps_mask[swing_index],axis=1)>=1).all():
-                continue
-            elif i<20:
-                print(">>>>>>> In Swing Traj Cal, there are less than one possible landing points in future pose")
-                print(f"future pose={target_se3}\n landing points\n{self.hex_state.env_pointsmap_voxels.landing_points[future_lp_idx]}")
-                
+            next_candidate_mask = candidate_mask.copy()
             for leg_index in swing_index:
-                pointmap = self.hex_state.env_pointsmap_voxels
-                possible_points = (target_se3.inv() * (pointmap.landing_points[future_lp_idx[swing_has_lps_mask[leg_index]]].T)).T
-                mask = self.hex_state._LegLegCollisionFree(
-                    possible_points,target_R_stance_points,self.q3_branches[stance_index],leg_index,stance_index
-                )
-                future_lp_mask[leg_index,swing_has_lps_mask[leg_index]] &= mask
-            if (np.sum(future_lp_mask[swing_index,...].any(axis=-1),axis=1)>=3).all():
+                # 按世界点索引取交集，不依赖未来查询结果的排列顺序。
+                feasible_indices = future_lp_idx[future_lp_mask[leg_index,:,branches[leg_index]]]
+                next_candidate_mask[leg_index] &= np.isin(lp_idx,feasible_indices)
+            if (next_candidate_mask[swing_index].sum(axis=1) < min_candidates).any():
                 break
-            elif i < 20:
-                print(">>>>>>> In Swing Traj Cal, there are less than three possible landing points in future pose")
-                print(f"future pose={future_path_se3[i]}\n landing points\n{self.hex_state.env_pointsmap_voxels.landing_points[future_lp_idx]}")
-        #从当前向未来推进
-        # for i in range(0,len(future_path_se3),20):
-        #     last_lp_mask = lp_mask.copy()
-        #     _,future_lp_idx,_,future_lp_mask = self.hex_state.RobotFeasiCheck(future_path_se3[i],lp_idx)
-        #     lp_mask = future_lp_mask&lp_mask
-        #     swing_has_lps_mask = lp_mask.any(axis=-1)
-        #     if not (np.sum(swing_has_lps_mask[swing_index],axis=1)>=3).all():
-        #         pointmap = self.hex_state.env_pointsmap_voxels
-        #         swing_has_lps_mask = last_lp_mask.any(axis=-1)
-        #         for leg_index in swing_index:
-        #             possible_points = (target_se3.inv() * (pointmap.landing_points[future_lp_idx[swing_has_lps_mask[leg_index]]].T)).T
-        #             mask = self.hex_state._LegLegCollisionFree(
-        #                 possible_points,target_R_stance_points,self.q3_branches[stance_index],leg_index,stance_index
-        #             )
-        #             future_lp_mask[leg_index,swing_has_lps_mask[leg_index]] &= mask
-        #         print(">>>>>>>>>in swing traj cal three are less than three possible points in future pos,last pose has",np.sum(swing_has_lps_mask[swing_index],axis=-1))
-        #         break
-        #     elif i > (len(future_path_se3)-21):
+            candidate_mask = next_candidate_mask
 
-
-
-            
         for leg_index in swing_index:
-            #配合从未来向现在推进
-            same_branches_mask = future_lp_mask[leg_index,:,self.q3_branches[leg_index]]
-            #配合从现在向未来推进
-            # same_branches_mask = last_lp_mask[leg_index,:,self.q3_branches[leg_index]]
-            if same_branches_mask.any():
-                chosen_lp_idx = future_lp_idx[same_branches_mask]
-                landing_q3_branch = int(self.q3_branches[leg_index])
-            else:
-                landing_q3_branch = int((self.q3_branches[leg_index]+1)%2)
-                diff_branches_mask = future_lp_mask[leg_index,:,landing_q3_branch]
-                chosen_lp_idx = future_lp_idx[diff_branches_mask]
-            if chosen_lp_idx.size == 0:
-                print("leg_index={}, q3_branches={}".format(leg_index,self.q3_branches[leg_index]))
-                print("future_lp_mask true sum =",future_lp_mask.sum())
-                # raise RuntimeError("chosen lp idex get empty value")
-                print(">>>>>>>>>>>chosen lp index get empty value<<<<<<<<<<<,")
-                continue
+            chosen_lp_idx = lp_idx[candidate_mask[leg_index]]
+            landing_q3_branch = int(branches[leg_index])
             #3,N
             R_points = target_se3.inv() * self.hex_state.env_pointsmap_voxels.landing_points[chosen_lp_idx].T
             #N,3
             B_points = self.kin._R2B(R_points,leg_index).T
+            
             flat_index = self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
             landing_idx = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[flat_index,leg_index])
+            # landing_idx = np.argmax(np.linalg.norm(B_points-self.B_e_cur[:,leg_index],axis=0))
+
             R_normal = target_se3.R.T @ self.hex_state.env_pointsmap_voxels.normals[chosen_lp_idx[landing_idx]].T
             landing_normal = R_normal.copy()
             if leg_index < 3:

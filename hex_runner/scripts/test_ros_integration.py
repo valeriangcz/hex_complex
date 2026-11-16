@@ -32,7 +32,16 @@ def stop(process):
             process.wait()
 
 
-def fake_devices(mode):
+def snapshot(filename):
+    import numpy as np
+    from types import SimpleNamespace
+    from hex_kinematic.sim_info import read_sim_info
+    values = read_sim_info(filename)['initial_state']
+    return SimpleNamespace(q=np.asarray(values['q']), W_T_R=np.asarray(values['W_T_R']),
+                           magnetic=np.asarray(values['magnetic'],dtype=bool))
+
+
+def fake_devices(mode, to_sim_info):
     """Test-only provider, never installed/launched as a real hardware driver."""
     import numpy as np
     import rospy
@@ -47,8 +56,7 @@ def fake_devices(mode):
 
     rospy.init_node("test_devices")
     workspace = Path(__file__).resolve().parents[3]
-    from hex_runner.config import RunnerConfig
-    initial=RunnerConfig.load(workspace/'src/hex_runner/config'/(mode+'.yaml'),workspace/'data').initial_state
+    initial=snapshot(to_sim_info)
     q, pose=initial.q.copy(), initial.W_T_R.copy()
     state = dict(q=q, tau=np.zeros((6,3)), enabled=initial.magnetic.copy(), attached=initial.magnetic.astype(float),
                  invalid=False, change_at=0, ramp_start=initial.magnetic.astype(float))
@@ -110,12 +118,13 @@ def main():
     parser.add_argument('--motion-seconds',type=float,help='Run the full motion interval rather than ending after the required gait switches')
     parser.add_argument('--min-gait-switches',type=int,default=2)
     parser.add_argument('--report',type=Path)
+    parser.add_argument('--to-sim-info',type=Path,help=argparse.SUPPRESS)
     parser.add_argument('--fake-device',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
     if args.joystick and args.mode != 'complex':
         parser.error('--joystick requires --mode complex')
     if args.fake_device:
-        fake_devices(args.mode)
+        fake_devices(args.mode,args.to_sim_info)
         return
     with socket.socket() as sock:
         sock.bind(('127.0.0.1',0)); port=sock.getsockname()[1]
@@ -176,47 +185,57 @@ def main():
                                          ('magnetic','hex/magnetic/state',MagneticState)]:
                     subscribers.append(rospy.Subscriber(topic,typ,lambda msg,n=name: frames[n].update({msg.header.stamp.to_nsec():msg})))
                 velocity=rospy.Publisher('hex/cmd_vel',Twist,queue_size=1)
-                if args.backend=='fake':
-                    start([sys.executable,str(Path(__file__).resolve()),'--fake-device','--mode',args.mode])
-                else:
-                    start(['roslaunch','hex_isaacgym','backend.launch',
-                           'config:='+str(workspace/'src/hex_isaacgym/config'/('plane.yaml' if args.mode=='climb' else 'complex_surface4.yaml')),
-                           'device:='+args.device,'initial_config:='+str(workspace/'src/hex_runner/config'/(args.mode+'.yaml'))])
                 config=yaml.safe_load((workspace/'src/hex_runner/config'/(args.mode+'.yaml')).read_text())
                 if args.pose_source:config['pose_source']=args.pose_source
                 config_file=directory+'/runner.yaml'
                 with open(config_file,'w') as stream:yaml.safe_dump(config,stream)
+                sim_info=Path(directory)/'to_sim_info.yaml'
                 runner_process=start(['rosrun','hex_runner','runner_node.py','--config',config_file,
-                                      '--data-root',str(workspace/'data'),'--output-dir',directory+'/runs'])
+                                      '--data-root',str(workspace/'data'),'--output-dir',directory+'/runs',
+                                      '--to-sim-info',str(sim_info)])
+                wait_for(lambda:latest.get('expert_type')==args.mode,'runner initialization',90)
+                if args.backend=='fake':
+                    device_process=start([sys.executable,str(Path(__file__).resolve()),'--fake-device',
+                                          '--mode',args.mode,'--to-sim-info',str(sim_info)])
+                else:
+                    device_process=start(['roslaunch','hex_isaacgym','backend.launch',
+                        'config:='+str(workspace/'src/hex_isaacgym/config'/('plane.yaml' if args.mode=='climb' else 'complex_surface4.yaml')),
+                        'device:='+args.device,'headless:=true','to_sim_info:='+str(sim_info)])
                 wait_for(lambda:latest.get('feedback_ready'),'device feedback',90)
                 assert latest['phase']=='WAITING' and not any(counts.values()), (latest,counts)
                 import rosservice
                 operations={name.rsplit('/',1)[1] for name in rosservice.get_service_list() if name.startswith('/hex/runner/')}
                 assert operations == {'reset','start','pause','disable_actuators','release_magnets'},operations
                 checks.append('no actuator commands before reset')
+                assert '/hex/reference_path' not in dict(rospy.get_published_topics())
+                checks.append('initial state and reference path supplied by YAML, without path topic')
                 if args.joystick:
                     from sensor_msgs.msg import Joy
-                    start(['roslaunch','control_stick','climb.launch','start_joy:=false'])
+                    start(['roslaunch','control_stick','joy_ctrl.launch','start_joy:=false'])
                     joy=rospy.Publisher('joy',Joy,queue_size=1)
                     wait_for(lambda:joy.get_num_connections()>0,'joystick subscription')
                 def service(name,success=True):
+                    previous_reset = latest.get('reset_count',0)
                     rospy.wait_for_service('hex/runner/'+name,timeout=5)
                     if args.joystick and success and name in ('reset','start','pause'):
                         joy.publish(Joy(axes=[0.,0.,0.],buttons=[0]*8))
                         time.sleep(.08)
                         pressed=[0]*8;pressed[{'reset':1,'start':0,'pause':4}[name]]=1
                         joy.publish(Joy(axes=[0.,0.,0.],buttons=pressed))
+                        if name=='reset':
+                            wait_for(lambda:latest.get('reset_count',0)>previous_reset,'joystick reset completed')
                         return
                     result=rospy.ServiceProxy('hex/runner/'+name,Trigger)()
                     assert result.success==success,result
-                from hex_runner.config import RunnerConfig
+                    if name=='reset' and success:
+                        wait_for(lambda:latest.get('reset_count',0)>previous_reset,'reset completed')
                 service('reset')
                 wait_for(lambda:latest.get('phase')=='READY','reset READY')
                 wait_for(lambda:all(counts.values()),'initial hold publications')
                 assert commands['servo'].enable
                 assert read_servo_enabled(commands['servo']).all()
                 np.testing.assert_allclose(read_motor(commands['motor'], 'pos'),
-                    RunnerConfig.load(workspace/'src/hex_runner/config'/(args.mode+'.yaml'), workspace/'data').initial_state.q[:,:3])
+                    snapshot(sim_info).q[:,:3])
                 checks.append('reset commands configured initial joint and magnetic targets')
                 wait_for(lambda:velocity.get_num_connections()>0,'velocity subscription')
                 if args.mode=='climb':
@@ -294,8 +313,7 @@ def main():
                         checks.append('pause permits reset or disable; disable latch prevents start until reset')
                     rospy.wait_for_service('test/invalidate',timeout=5)
                     invalidator=rospy.ServiceProxy('test/invalidate',SetBool)
-                    from hex_runner.config import RunnerConfig
-                    initial = RunnerConfig.load(workspace/'src/hex_runner/config'/(args.mode+'.yaml'), workspace/'data').initial_state
+                    initial = snapshot(sim_info)
                     wait_for(lambda: latest.get('reset_count', 0) >= 2, 'reset applied before fault injection')
                     reset_counts = counts.copy()
                     wait_for(lambda: all(counts[name] > reset_counts[name] for name in counts),
@@ -314,7 +332,7 @@ def main():
                     for name in commands:
                         assert str(commands[name])==str(old[name]),name
                     service('reset');wait_for(lambda:latest.get('phase')=='READY','fault recovery')
-                    stop(processes[1])  # Missing providers must become stale, not fabricate state.
+                    stop(device_process)  # Missing providers must become stale, not fabricate state.
                     wait_for(lambda:latest.get('phase')=='FAULT','feedback stream timeout',4)
                     service('reset',False)
                     checks.append('invalid/stale feedback latches fault, holds every output, explicit recovery')
@@ -336,8 +354,7 @@ def main():
                     wait_for(lambda:sim.get('reset_count',0)>resets,'physical reset')
                     wait_for(lambda:reset_stamps and all(reset_stamps[-1] in data for data in frames.values()),'exact reset feedback frame')
                     stamp=reset_stamps[-1]
-                    from hex_runner.config import RunnerConfig
-                    initial=RunnerConfig.load(workspace/'src/hex_runner/config'/(args.mode+'.yaml'),workspace/'data').initial_state
+                    initial=snapshot(sim_info)
                     q=np.column_stack((read_motor(frames['motor'][stamp],'pos'),read_servo(frames['servo'][stamp])))
                     np.testing.assert_allclose(q,initial.q,atol=2e-6)
                     pose_msg=frames['pose'][stamp].pose

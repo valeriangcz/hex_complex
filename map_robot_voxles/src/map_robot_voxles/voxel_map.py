@@ -1573,6 +1573,8 @@ class HexState:
         #                    self.robot_voxels.leg_voxels.ankle_collide_radi)
         # print("reachable_mask=",reachable_mask)
         # print("ankle_free_mask=",ankle_free_mask)
+        # if not ((reachable_mask&ankle_free_mask).all()):
+        #     print(f"stance not feasible  reachable_mask={reachable_mask}, ankle_free_mask={ankle_free_mask}")
 
         return (reachable_mask&ankle_free_mask).all()
         # return (inside_mask&ankle_free_mask).all()

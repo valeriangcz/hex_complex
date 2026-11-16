@@ -7,7 +7,6 @@ import numpy as np
 import rospy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped
-from nav_msgs.msg import Path as PathMessage
 from std_msgs.msg import Float64MultiArray
 from rosgraph_msgs.msg import Clock
 from std_srvs.srv import Trigger, TriggerResponse
@@ -29,9 +28,9 @@ class SimulationNode:
         self.lock = Lock()
         self.command = self._initial_command()
         self.pending_reset = False
-        self.pending_path = None
         self.initial_state_pending = True
         self.backend.reset(config.initial_state, config.magnets)
+        self.backend.set_reference_path(config.reference_path)
         self.reset_count = 0
         self.wall_rate_hz = 1. / config.backend.control_dt if wall_rate_hz is None else wall_rate_hz
         self.motor_pub = rospy.Publisher("hex/motor/state", MultiLegState, queue_size=1)
@@ -45,8 +44,7 @@ class SimulationNode:
         self.subscribers = [
             rospy.Subscriber("hex/motor/command", MultiLegCommand, self._motor, queue_size=1),
             rospy.Subscriber("hex/servo/command", servo_cmd, self._servo, queue_size=1),
-            rospy.Subscriber("hex/magnetic/command", MagneticCmd, self._magnetic, queue_size=1),
-            rospy.Subscriber("hex/reference_path", PathMessage, self._path, queue_size=1)]
+            rospy.Subscriber("hex/magnetic/command", MagneticCmd, self._magnetic, queue_size=1)]
         self.reset_service = rospy.Service("hex/sim/reset", Trigger, self._reset)
         rospy.on_shutdown(self.backend.close)
 
@@ -92,12 +90,6 @@ class SimulationNode:
         with self.lock:
             self.command.adhesions = read_magnetic(message)
 
-    def _path(self, message):
-        points = np.array([[pose.pose.position.x, pose.pose.position.y, pose.pose.position.z] for pose in message.poses])
-        if message.header.frame_id == "world" and points.shape[0] and np.isfinite(points).all():
-            with self.lock:
-                self.pending_path = points
-
     def _reset(self, _request):
         with self.lock:
             if self.pending_reset:
@@ -109,6 +101,8 @@ class SimulationNode:
         with self.lock:
             reset_state = None
             if self.pending_reset:
+                self.config = self.config.reload_initial_state()
+                self.backend.set_reference_path(self.config.reference_path)
                 reset_state = self.backend.reset(self.config.initial_state, self.config.magnets)
                 self.command = self._initial_command()
                 self.initial_state_pending = False
@@ -118,9 +112,6 @@ class SimulationNode:
                 reset_state = self.backend.get_state()
                 self.initial_state_pending = False
             command = self.command
-            path, self.pending_path = self.pending_path, None
-        if path is not None:
-            self.backend.set_reference_path(path)
         state = reset_state if reset_state is not None else self.backend.step(command)
         self._publish(state, command)
 
@@ -186,7 +177,7 @@ def bool_arg(value):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True)
-    parser.add_argument("--initial-config", required=True)
+    parser.add_argument("--to-sim-info", required=True)
     parser.add_argument("--device", default="")
     parser.add_argument("--headless", type=bool_arg, default=True)
     parser.add_argument("--publish-clock", type=bool_arg, default=False)
@@ -194,6 +185,6 @@ def main():
     args = parser.parse_args(rospy.myargv()[1:])
     if args.wall_rate_hz is not None and (not np.isfinite(args.wall_rate_hz) or args.wall_rate_hz < 0):
         parser.error("wall-rate-hz must be finite and nonnegative")
-    config = SimulationConfig.from_yaml(args.config, args.device or None, args.initial_config)
+    config = SimulationConfig.from_yaml(args.config, args.device or None, args.to_sim_info)
     rospy.init_node("hex_sim")
     SimulationNode(config, args.headless, args.publish_clock, args.wall_rate_hz).spin()

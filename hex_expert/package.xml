@@ -8,6 +8,8 @@
   <buildtool_depend>catkin</buildtool_depend>
   <depend>hex_kinematic</depend>
   <depend>map_robot_voxles</depend>
+  <exec_depend>hex_se3</exec_depend>
+  <exec_depend>python3-rospkg</exec_depend>
   <exec_depend>python3-numpy</exec_depend>
   <export/>
 </package>

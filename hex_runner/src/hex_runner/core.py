@@ -158,11 +158,9 @@ class Runner:
                 if action == "reset":
                     if feedback is None:
                         raise ValueError("reset lost feedback: " + unavailable)
-                    initial = self.config.initial_state
-                    if initial is None:
+                    if self.config.initial_state is None:
                         raise ValueError("initial_state is required for reset")
-                    self.adapter.reset(feedback)
-                    self.command = Command(initial.q, np.zeros((6, 3)), initial.magnetic, np.ones(6, dtype=bool))
+                    self.command = Command(*self.adapter.reset(feedback))
                     self.motor_servo_disabled = False
                     self.magnetic_forced_off = False
                     self.velocity[:] = 0

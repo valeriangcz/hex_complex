@@ -60,3 +60,36 @@ python3 src/hex_runner/scripts/test_ros_integration.py --backend isaac --mode cl
 ```
 
 实际可用速度还受跟踪增益、关节限位、摩擦和吸附状态影响；一次平面仿真不能替代实物速度标定。
+
+## 初始化与仿真初态文件
+
+runner 只解析 YAML 参数，直接创建 `ExpertComplex(...)` 或 `ExpertClimb(...)`。
+Expert 在创建时完成模型加载和初态计算；complex 还加载唯一一套 voxel 与参考路径。
+Adapter 不单独保存路径或环境，规划和完成判断使用 Expert 内部状态。
+complex 继续保持配置的 IK 分支，按环境可行性和表面法向生成初始支撑落脚点与 foot 角度。
+climb 的 joints/feet 配置由对应 Expert 求解。
+
+runner 创建 Expert 后写入 `config/to_sim_info.yaml`，其中包括机身位姿、六腿关节角、
+磁吸状态、电机/舵机使能和世界坐标参考路径。可用 `to_sim_info:=/path/to/file.yaml` 覆盖。
+这是运行生成的普通 YAML，不需要手工填写；没有启动标识、版本、轮询或文件校验协议。
+
+```bash
+# 一条命令：先创建 Expert 并写文件，再启动仿真。
+roslaunch hex_runner sim.launch mode:=complex headless:=true
+
+# 也可以分开启动：先 runner，确认 HEX_RUNNER_INITIALIZED 后再启动 backend。
+roslaunch hex_runner runner.launch mode:=complex
+roslaunch hex_isaacgym backend.launch \
+  config:=$PWD/src/hex_isaacgym/config/complex_surface4.yaml
+```
+
+`sim.launch` 的启动脚本转发 runner 输出，收到 `HEX_RUNNER_INITIALIZED` 后才启动 sim；
+runner 初始化失败则不创建仿真。不靠旧文件是否存在判断就绪，也不轮询文件。
+两个模式使用同样的文件接口。`data_root` 只交给 runner/Expert；sim 不读取 voxel 或原始轨迹文件。
+sim 从该文件获取路径绘制数据，原 `/hex/reference_path` topic 已删除。
+
+收到 reset 前，runner 不发送执行器命令。runner reset 复用 Expert 的模型和缓存，
+重新初始化、写文件并发送关节目标；READY 阶段全部 foot 舵机使能，RUNNING 后恢复步态使能规则。
+sim 物理 reset 重新读取文件并恢复初态和绘制路径。两种 reset 独立，不因文件修改自动重置物理机器人。
+操作时先暂停控制，再完成需要的 runner 初始化文件更新，最后触发 sim reset；不要同时重写和读取该文件。
+单独启动 sim 时，文件不存在或无法读取会直接报错退出。

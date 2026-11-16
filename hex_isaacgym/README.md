@@ -6,7 +6,7 @@
 ```bash
 source devel/setup.bash
 roslaunch hex_isaacgym backend.launch device:=cpu headless:=true \
-  initial_config:=$PWD/src/hex_runner/config/climb.yaml
+  to_sim_info:=$PWD/src/hex_runner/config/to_sim_info.yaml
 # 配套控制器与完整用法
 roslaunch hex_runner sim.launch mode:=climb
 ```
@@ -28,11 +28,13 @@ IMU 输出 world 中姿态、body 系角速度和扣除重力后转换至 body �
 reset 后首帧线加速度不可用，协方差首项为-1。完整位姿 frame_id=world，根链为body。
 
 config/plane.yaml、complex_surface4.yaml 仅包含物理参数。
-初态唯一来源为 initial_config 指定的 runner YAML 中的 initial_state，详细格式见 hex_runner/README.md。
-组合 sim.launch 自动将 runner_config 同时传给后端；独立启动必须显式传 initial_config。
-后端通过 hex_kinematic 的共用解析器读取关节或足端模式，不创建专家。
+初态唯一来源为 runner 生成的 `to_sim_info.yaml`，默认位于 hex_runner/config 下。
+组合 sim.launch 先创建 Expert 并生成文件，再启动后端。独立启动前先运行 runner 生成文件。
+后端直接读取 YAML，不解析 runner 配置、不求逆解、不创建 Expert 或规划 voxel。
+文件不存在、YAML 解析失败或必要字段缺失时报错退出，不等待文件、不使用默认初态。
+参考路径也从文件读取，不再订阅 `/hex/reference_path`。
 `/hex/sim/reset` (std_srvs/Trigger) 在物理循环恢复初态并清空执行器和传感器历史，
-时间保持递增。操作顺序：暂停步态（complex 用 pause，climb 发零速度）→ sim reset → 等反馈 → runner reset。
+时间保持递增。操作顺序：暂停步态（complex 用 pause，climb 发零速度）→ 完成 runner reset 的文件更新 → sim reset → 等反馈后恢复控制。
 可用 `publish_clock:=true` 发布 /clock；所有外部设备名称均支持 remap/namespace。
 
 纯物理库接口：`reset(InitialState, adhesion_init=None)`、`step(ActuatorCommand)`、`get_state()`、`close()`。
@@ -43,10 +45,11 @@ Isaac Gym 必须先于 Torch 导入，loader 负责导入顺序。
 
 ```bash
 python3 src/hex_isaacgym/scripts/test_backend.py --steps 5 --resets 2 --report /tmp/hex_backend.json
-python3 -m unittest discover -s src/hex_isaacgym/tests -v
+python3 src/hex_isaacgym/scripts/test_reset.py --to-sim-info src/hex_runner/config/to_sim_info.yaml
 ```
 
-物理 reset 使用共享 initial_state.pose、直接指定或逆解得到的 q，以及 initial_state.magnetic。
+物理 reset 重新读取 to_sim_info.yaml 中的机身矩阵、q 和 magnetic，并更新绘制路径。
+这些数据都由 runner 的 Expert 生成，仿真端不重复进行环境初始化。
 启动和物理 reset 同时恢复这些目标及使能状态，不使用复位前的最后命令。
 初始吸附腿立即恢复 suction_force_max，每腿三个作用点各分担1/3，其余腿为零。
 复位当周期先发布恢复后的初态，不推进物理；下周期继续正常步进，仿真时间不回退。

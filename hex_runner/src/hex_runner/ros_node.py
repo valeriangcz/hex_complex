@@ -7,14 +7,13 @@ import numpy as np
 import rospy
 from diagnostic_msgs.msg import DiagnosticArray, DiagnosticStatus, KeyValue
 from geometry_msgs.msg import PoseStamped, Twist
-from nav_msgs.msg import Path as PathMessage
 from std_msgs.msg import Float64MultiArray
 from std_srvs.srv import Trigger, TriggerResponse
 from dm_motor_fusion.msg import MultiLegCommand, MultiLegState
 from feetech_servo.msg import servo_cmd, servo_state
 from magnetic.msg import MagneticCmd, MagneticState
 from hex_kinematic.ros_contract import read_motor, read_servo, read_magnetic, write_magnetic, write_motor, write_servo, write_servo_enabled
-from hex_kinematic.se3_utils import transform_from_xyzw, transform_to_xyzw
+from hex_kinematic.se3_utils import transform_from_xyzw
 from .config import RunnerConfig
 from .core import Runner, FeedbackCache, Phase, finite
 from .adapters import ExpertAdapter
@@ -33,7 +32,6 @@ class RunnerNode:
         self.servo_pub = rospy.Publisher("hex/servo/command", servo_cmd, queue_size=1)
         self.magnetic_pub = rospy.Publisher("hex/magnetic/command", MagneticCmd, queue_size=1)
         self.diag_pub = rospy.Publisher("hex/runner/diagnostics", DiagnosticArray, queue_size=1)
-        self.path_pub = rospy.Publisher("hex/reference_path", PathMessage, queue_size=1, latch=True)
         self.subscribers = [
             rospy.Subscriber("hex/motor/state", MultiLegState, self._motor, queue_size=1),
             rospy.Subscriber("hex/servo/state", servo_state, self._servo, queue_size=1),
@@ -46,7 +44,6 @@ class RunnerNode:
                          lambda request, operation=action: self._operation(operation))
                          for action in ("reset", "start", "pause", "disable_actuators", "release_magnets")]
         self.last_diag = -float("inf")
-        self._publish_path()
         rospy.on_shutdown(self.shutdown)
 
     def _update(self, name, decode, message, sample=None):
@@ -174,20 +171,6 @@ class RunnerNode:
             else:
                 deadline = time.monotonic()  # No catch-up expert cycles.
 
-    def _publish_path(self):
-        if not self.runner.adapter.path:
-            return
-        message = PathMessage()
-        message.header.frame_id = "world"
-        message.header.stamp = rospy.Time.now()
-        for value in self.runner.adapter.path:
-            p, q = transform_to_xyzw(value.A)
-            pose = PoseStamped(header=message.header)
-            pose.pose.position.x, pose.pose.position.y, pose.pose.position.z = p
-            pose.pose.orientation.x, pose.pose.orientation.y, pose.pose.orientation.z, pose.pose.orientation.w = q
-            message.poses.append(pose)
-        self.path_pub.publish(message)
-
     def shutdown(self):
         # Do not issue implicit disable/demagnetize commands on shutdown.
         if self.output_dir is not None:
@@ -203,7 +186,10 @@ def main():
     parser.add_argument("--config", required=True)
     parser.add_argument("--data-root", default="")
     parser.add_argument("--output-dir", default="")
+    parser.add_argument("--to-sim-info", default="")
     args = parser.parse_args(rospy.myargv()[1:])
-    config = RunnerConfig.load(args.config, args.data_root or None)
+    config = RunnerConfig.load(args.config, args.data_root or None, args.to_sim_info or None)
     rospy.init_node("hex_runner")
-    RunnerNode(config, args.output_dir or None).spin()
+    node = RunnerNode(config, args.output_dir or None)
+    print("HEX_RUNNER_INITIALIZED", flush=True)
+    node.spin()
