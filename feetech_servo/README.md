@@ -89,6 +89,60 @@ python3 src/feetech_servo/test/test_interface_pty.py
 
 测试启动独立本地 ROS master 和伪串口，不连接真实舵机。
 
+## 六舵机正弦运动与完整读写测速
+
+先在自定义配置中填写实测 `offset_deg`、`direction`、ID及串口参数；
+默认全零偏移无法覆盖负半周，测试会拒绝运动。停止占用同一串口的其他驱动和 runner。
+启动时会先关闭六路扭矩读取位置，再以不超过3°/秒的目标速度平滑过渡到机械零点。
+启动、退出均涉及失能，请在机构可失去主动支撑的条件下测试。
+
+```bash
+source /opt/ros/noetic/setup.bash
+catkin_make --pkg feetech_servo
+source devel/setup.bash
+roslaunch feetech_servo sine_benchmark.launch config:=/absolute/path/calibrated_servo.yaml
+```
+
+默认六路围绕标定零点同相运行：幅度±5°、周期10秒、正式测速60秒。
+启动过渡、一个周期的幅度渐入、结束回零均不计入测速。所有目标限定在相对零点±90°内，
+且必须落在各舵机绝对量程内；若启动反馈已超出±90°则拒绝主动运动。
+正常结束缓慢回零后失能，Ctrl-C、无效反馈或超时会停止轨迹并尝试失能。
+串口断开、驱动退出或反馈超时后，不能保证失能送达；日志会报告未确认状态。
+
+可覆盖参数，例如（波特率必须与舵机已有设置一致）：
+
+```bash
+roslaunch feetech_servo sine_benchmark.launch \
+  config:=/absolute/path/calibrated_servo.yaml \
+  port:=/dev/ttyUSB0 baud_rate:=1000000 \
+  amplitude_deg:=5 period_s:=10 duration_s:=60 read_timeout_ms:=20
+```
+
+其他参数：`feedback_timeout_s` 默认2秒、`transition_speed_deg_s` 默认3、
+`namespace` 默认 `feetech_servo_test`。测试专用驱动关闭额外状态轮询，
+使用 `move_time_ms=10`、`speed=0`，不修改生产配置或舵机EEPROM。
+不要将测试话题连接到其他驱动或发布端；脚本会检查测试话题的独占关系。
+
+测速不限于100Hz：每轮发送六路目标，等待六路位置反馈后立即开始下一轮。
+按真实时间计算正弦，因此通信快慢不改变正弦周期。每秒打印实际频率；结束的 `RESULT` JSON
+给出完整循环Hz、六路全部有效的循环Hz、与100Hz的差值、各路有效/无效读取数、
+反馈超时次数及循环耗时均值/P95/最大值。例如 `73.4Hz` 表示实测低于100Hz约26.6Hz。
+失败的测速会标记 `status=aborted`，保留已采集数据；初始化失败时测速频率为0。
+超时轮次计入测量时长和超时次数，不计为完成循环；初始化或退出阶段的超时通过错误信息报告。
+
+测量使用单调时钟，包含ROS、现有驱动及串口开销，是此测试方式下的完整往返性能。
+每轮至少166字节：20字节扭矩同步写、50字节位置同步写、6组各16字节的位置请求和应答。
+8N1下115200波特率的纯传输下限约14.4毫秒，即理论上限约69.4Hz；实际还受USB延迟和舵机响应影响。
+同步写没有逐舵机应答，六路位置有效不代表本次目标已执行，退出的有效反馈也不是扭矩关闭确认。
+
+无硬件验证（需要已构建并source工作空间）：
+
+```bash
+python3 src/feetech_servo/test/test_sine_benchmark_pty.py
+```
+
+伪串口只验证流程、统计及异常处理，不代表真实通信频率。
+
 ## 原始库独立编译
 
 仍可在 `src` 子目录用 CMake 独立构建 `libSCServo.a`。

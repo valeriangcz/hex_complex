@@ -1,0 +1,32 @@
+<launch>
+  <arg name="config" default="$(find feetech_servo)/para/servo.yaml"/>
+  <arg name="namespace" default="feetech_servo_test"/>
+  <arg name="port" default=""/>
+  <arg name="baud_rate" default="1000000"/>
+  <arg name="read_timeout_ms" default="20"/>
+  <arg name="amplitude_deg" default="5.0"/>
+  <arg name="period_s" default="10.0"/>
+  <arg name="duration_s" default="60.0"/>
+  <arg name="feedback_timeout_s" default="2.0"/>
+  <arg name="transition_speed_deg_s" default="3.0"/>
+
+  <group ns="$(arg namespace)">
+    <node pkg="feetech_servo" type="feetech_servo_interface" name="interface" output="screen">
+      <rosparam command="load" file="$(arg config)"/>
+      <param if="$(eval arg('port') != '')" name="port" value="$(arg port)"/>
+      <param if="$(eval arg('baud_rate') != '')" name="baud_rate" value="$(arg baud_rate)" type="int"/>
+      <param name="state_hz" value="0.0"/>
+      <param name="move_time_ms" value="10"/>
+      <param name="speed" value="0"/>
+      <param name="read_timeout_ms" value="$(arg read_timeout_ms)" type="int"/>
+    </node>
+    <node pkg="feetech_servo" type="sine_benchmark.py" name="sine_benchmark" output="screen" required="true">
+      <param name="interface_node" value="interface"/>
+      <param name="amplitude_deg" value="$(arg amplitude_deg)" type="double"/>
+      <param name="period_s" value="$(arg period_s)" type="double"/>
+      <param name="duration_s" value="$(arg duration_s)" type="double"/>
+      <param name="feedback_timeout_s" value="$(arg feedback_timeout_s)" type="double"/>
+      <param name="transition_speed_deg_s" value="$(arg transition_speed_deg_s)" type="double"/>
+    </node>
+  </group>
+</launch>

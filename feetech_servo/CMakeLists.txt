@@ -30,6 +30,10 @@ target_include_directories(feetech_servo_interface PRIVATE ${catkin_INCLUDE_DIRS
 add_dependencies(feetech_servo_interface ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})
 target_link_libraries(feetech_servo_interface SCServo ${catkin_LIBRARIES})
 
+catkin_install_python(PROGRAMS scripts/sine_benchmark.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
+
 install(TARGETS feetech_servo_interface
   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )

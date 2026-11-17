@@ -5,7 +5,7 @@ ids: [1, 2, 3, 4, 5, 6]
 
 # Absolute servo angle when the corresponding command is 0 degrees.
 # Replace with measured installation offsets before controlling the mechanism.
-offset_deg: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+offset_deg: [0.1, 0.2, 0.3, 0.1, 0.1, 0.1]
 direction: [1, 1, 1, 1, 1, 1]
 
 # Initial conversion convention; calibrate against the actual servo variant.
