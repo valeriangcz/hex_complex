@@ -37,28 +37,28 @@ class ActuatorCommand:
     q_des: np.ndarray
     tau_ff: np.ndarray
     adhesions: np.ndarray
-    motor_mode: int = 1
     servo_enabled: np.ndarray = None
     motor_velocity: np.ndarray = None
     motor_kp: np.ndarray = None
     motor_kd: np.ndarray = None
 
     def __post_init__(self):
-        self.q_des = _finite_array(self.q_des, (6, 4), "q_des")
-        self.tau_ff = _finite_array(self.tau_ff, (6, 3), "tau_ff")
-        if self.motor_mode not in (-1, 0, 1):
-            raise ValueError("motor mode must be disable, zero torque or MIT")
-        enabled = np.ones(6, dtype=bool) if self.servo_enabled is None else np.asarray(self.servo_enabled)
-        if enabled.shape != (6,) or enabled.dtype != np.bool_:
-            raise ValueError("servo_enabled must be a boolean array with shape (6,)")
+        n = np.asarray(self.q_des).shape[0]
+        if n not in (4, 6):
+            raise ValueError("expected four or six legs")
+        self.q_des = _finite_array(self.q_des, (n, 4), "q_des")
+        self.tau_ff = _finite_array(self.tau_ff, (n, 3), "tau_ff")
+        enabled = np.ones(n, dtype=bool) if self.servo_enabled is None else np.asarray(self.servo_enabled)
+        if enabled.shape != (n,) or enabled.dtype != np.bool_:
+            raise ValueError("servo_enabled must be a boolean array with shape (n,)")
         self.servo_enabled = enabled.copy()
         for name, default in (("motor_velocity", 0.), ("motor_kp", 60.), ("motor_kd", 1.)):
             value = getattr(self, name)
-            value = np.full((6, 3), default) if value is None else _finite_array(value, (6, 3), name)
+            value = np.full((n, 3), default) if value is None else _finite_array(value, (n, 3), name)
             if name != "motor_velocity" and (value < 0).any():
                 raise ValueError("motor gains must be nonnegative")
             setattr(self, name, value)
-        adhesions = _finite_array(self.adhesions, (6,), "adhesions")
+        adhesions = _finite_array(self.adhesions, (n,), "adhesions")
         self.adhesions = adhesions.astype(bool)
 
 
@@ -72,9 +72,12 @@ class InitialState:
 
     def __post_init__(self):
         object.__setattr__(self, "W_T_R", _transform_matrix(self.W_T_R))
-        object.__setattr__(self, "q", _finite_array(self.q, (6, 4), "q"))
-        q_dot = np.zeros((6, 4), dtype=np.float64) if self.q_dot is None else self.q_dot
-        object.__setattr__(self, "q_dot", _finite_array(q_dot, (6, 4), "q_dot"))
+        n = np.asarray(self.q).shape[0]
+        if n not in (4, 6):
+            raise ValueError("expected four or six legs")
+        object.__setattr__(self, "q", _finite_array(self.q, (n, 4), "q"))
+        q_dot = np.zeros((n, 4), dtype=np.float64) if self.q_dot is None else self.q_dot
+        object.__setattr__(self, "q_dot", _finite_array(q_dot, (n, 4), "q_dot"))
 
 
 @dataclass(frozen=True)
@@ -99,8 +102,11 @@ class RobotState:
         if not np.isfinite(self.sim_time) or not np.isfinite(self.run_elapsed):
             raise ValueError("sim_time and run_elapsed must be finite")
         object.__setattr__(self, "W_T_R", _transform_matrix(self.W_T_R))
-        object.__setattr__(self, "q", _finite_array(self.q, (6, 4), "q"))
-        object.__setattr__(self, "q_dot", _finite_array(self.q_dot, (6, 4), "q_dot"))
-        object.__setattr__(self, "q_torque", _finite_array(self.q_torque, (6, 3), "q_torque"))
-        object.__setattr__(self, "adhesion_force", _finite_array(self.adhesion_force, (6,), "adhesion_force"))
-        object.__setattr__(self, "contact_forces", _finite_array(self.contact_forces, (6, 3), "contact_forces"))
+        n = np.asarray(self.q).shape[0]
+        if n not in (4, 6):
+            raise ValueError("expected four or six legs")
+        object.__setattr__(self, "q", _finite_array(self.q, (n, 4), "q"))
+        object.__setattr__(self, "q_dot", _finite_array(self.q_dot, (n, 4), "q_dot"))
+        object.__setattr__(self, "q_torque", _finite_array(self.q_torque, (n, 3), "q_torque"))
+        object.__setattr__(self, "adhesion_force", _finite_array(self.adhesion_force, (n,), "adhesion_force"))
+        object.__setattr__(self, "contact_forces", _finite_array(self.contact_forces, (n, 3), "contact_forces"))

@@ -323,16 +323,16 @@ class HexStateTorch:
     and deduplication in the optimizer's hot path.
     """
     # 与 HexState 保持同名同值。修改后重新创建对象，不在运行中同步缓存。
-    BODY_HARD_CLEARANCE = 0.00  # m
+    BODY_HARD_CLEARANCE = 0.01  # m
     BODY_SOFT_CLEARANCE = 0.02  # m
-    BODY_COST_WEIGHT = 10.0
+    BODY_COST_WEIGHT = 20.0
 
-    LEG_BOUNDARY_HARD_MARGIN = 0.03
+    LEG_BOUNDARY_HARD_MARGIN = 0.01
     LEG_BOUNDARY_SOFT_MARGIN = 0.06
     LEG_BOUNDARY_COST_SCALE = 0.02
 
-    LEG_FORCE_HARD_MARGIN = 90.0  # N
-    LEG_FORCE_SOFT_MARGIN = 120.0
+    LEG_FORCE_HARD_MARGIN = 85.0  # N
+    LEG_FORCE_SOFT_MARGIN = 100.0
     LEG_FORCE_COST_SCALE = 10.0
 
     LEG_PLANE_HARD_ANGLE_DEG = 15.0
@@ -344,13 +344,13 @@ class HexStateTorch:
     LEG_XB3_COST_SCALE = 10.0
     LEG_XB3_TRANSITION_DEG = 10.0
 
-    LEG_ANKLE_HARD_MARGIN = 0.05
-    LEG_ANKLE_SOFT_MARGIN = 0.08
+    LEG_ANKLE_HARD_MARGIN = 0.06
+    LEG_ANKLE_SOFT_MARGIN = 0.1
     LEG_ANKLE_COST_SCALE = 0.03
 
-    LEG_END_HARD_CLEARANCE = 0.03
-    LEG_LEG_END_HARD_CLEARANCE = 0.05
-    COST_TARGET_FOOTHOLDS = 6
+    LEG_END_HARD_CLEARANCE = 0.04
+    LEG_LEG_END_HARD_CLEARANCE = 0.06
+    COST_TARGET_FOOTHOLDS = 30
 
     def __init__(self, map_data, device="auto", dtype=torch.float32, pose_chunk_size=64):
         self.device = resolve_device(device)

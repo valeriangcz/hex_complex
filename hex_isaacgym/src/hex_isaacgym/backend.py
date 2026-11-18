@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-from hex_kinematic.conventions import COMMAND_JOINT_NAMES, LEG_NAMES, MOTOR_JOINT_NAMES
+from hex_kinematic.conventions import COMMAND_JOINT_NAMES, LEG_NAMES, MOTOR_JOINT_NAMES, robot_leg_names
 from hex_kinematic.se3_utils import transform_from_xyzw, transform_to_xyzw
 
 from .actuation import update_adhesion_forces
@@ -23,6 +23,8 @@ class IsaacGymBackend:
         if not isinstance(config, BackendConfig):
             raise TypeError("config must be BackendConfig or a YAML path")
         config.validate()
+        self.leg_names = robot_leg_names(config.robot_urdf)
+        self.num_legs = len(self.leg_names)
         self.config = config
         self.headless = bool(headless)
         self._closed = False
@@ -75,10 +77,13 @@ class IsaacGymBackend:
         params.use_gpu_pipeline = use_gpu
         params.physx.use_gpu = use_gpu
         params.physx.num_threads = 10
-        params.physx.num_position_iterations = 8
-        params.physx.num_velocity_iterations = 2
+        # Preview 4 exposes rigid contact constraints rather than contact Kp/Kd.
+        # Improve convergence under adhesion loads and correct penetration faster.
+        params.physx.solver_type = 1  # TGS
+        params.physx.num_position_iterations = 16
+        params.physx.num_velocity_iterations = 1
         params.physx.contact_offset = 0.01
-        params.physx.max_depenetration_velocity = 0.5
+        params.physx.max_depenetration_velocity = 1.0
         params.physx.bounce_threshold_velocity = 0.2
         graphics_device_id = -1 if self.headless else compute_device_id
         self.sim = self.gym.create_sim(
@@ -143,9 +148,9 @@ class IsaacGymBackend:
         self.num_bodies = self.gym.get_asset_rigid_body_count(asset)
         self.dof_names = tuple(self.gym.get_asset_dof_names(asset))
         self.body_names = tuple(self.gym.get_asset_rigid_body_names(asset))
-        if self.num_dofs != 42 or self.num_bodies != 55:
+        if self.num_dofs != 7 * self.num_legs or self.num_bodies != 1 + 9 * self.num_legs:
             raise ValueError(
-                "hex_magnetic asset expected 42 DOFs and 55 bodies, got {} and {}".format(
+                "magnetic asset has unexpected DOF/body counts, got {} and {}".format(
                     self.num_dofs, self.num_bodies
                 )
             )
@@ -153,6 +158,8 @@ class IsaacGymBackend:
         self.motor_indices_np = self._dof_indices(MOTOR_JOINT_NAMES)
         self.foot_indices_np = self._body_indices(("toe",))[:, 0]
         self.magnetic_indices_np = self._body_indices(("suck", "toe", "empty"))
+        # Single-point alternative at the toe surface center:
+        # self.magnetic_indices_np = self._body_indices(("toe",))
 
         shape_props = self.gym.get_asset_rigid_shape_properties(asset)
         for prop in shape_props:
@@ -214,7 +221,7 @@ class IsaacGymBackend:
             elif joint == "foot":
                 kp[index], kd[index] = 20.0, 0.3
             elif joint in ("ball1", "ball2", "suck"):
-                kp[index], kd[index] = 0.0, 0.3
+                kp[index], kd[index] = 0.5, 0.1
             else:
                 raise ValueError("unexpected physical DOF name: {}".format(name))
         self.kp_np, self.kd_np = kp, kd
@@ -222,12 +229,12 @@ class IsaacGymBackend:
     @property
     def motor_torque_limits(self):
         """Asset effort limits in public (6,3) motor order."""
-        return self.torque_limits_np[self.motor_indices_np].reshape(6, 3).copy()
+        return self.torque_limits_np[self.motor_indices_np].reshape(self.num_legs, 3).copy()
 
     def _dof_indices(self, joint_parts):
         names = [
             "j_{}_{}".format(leg, joint)
-            for leg in LEG_NAMES
+            for leg in self.leg_names
             for joint in joint_parts
         ]
         missing = [name for name in names if name not in self.dof_names]
@@ -238,7 +245,7 @@ class IsaacGymBackend:
     def _body_indices(self, body_parts):
         names = [
             ["l_{}_{}".format(leg, part) for part in body_parts]
-            for leg in LEG_NAMES
+            for leg in self.leg_names
         ]
         missing = [name for leg_names in names for name in leg_names if name not in self.body_names]
         if missing:
@@ -264,17 +271,19 @@ class IsaacGymBackend:
         ).view(1, self.num_bodies, 13)
         self.rb_forces = torch.zeros_like(self.contact_forces)
         self.rb_positions = torch.zeros_like(self.contact_forces)
+        # Local application points for suck, toe, and empty, respectively.
         local_positions = torch.tensor(
-            (
-                (0.0, 0.02, 0.009),
-                (0.02 * np.sqrt(3.0), -0.01, 0.0),
-                (-0.02 * np.sqrt(3.0), -0.01, 0.0),
-            ),
-            dtype=torch.float32,
-            device=self.device,
+            ((0.0, 0.02, 0.009),
+             (0.02 * np.sqrt(3.0), -0.01, 0.0),
+             (-0.02 * np.sqrt(3.0), -0.01, 0.0)),
+            dtype=torch.float32, device=self.device,
         )
+        # Single-point alternative: toe surface-facing cylinder end at +Z.
+        # local_positions = torch.tensor(
+        #     ((0.0, 0.0, 0.004),), dtype=torch.float32, device=self.device,
+        # )
         magnetic = torch.as_tensor(self.magnetic_indices_np, dtype=torch.long, device=self.device)
-        self.rb_positions[0, magnetic.reshape(-1), :] = local_positions.repeat(6, 1)
+        self.rb_positions[0, magnetic.reshape(-1), :] = local_positions.repeat(self.num_legs, 1)
         self.command_indices = torch.as_tensor(self.command_indices_np, dtype=torch.long, device=self.device)
         self.motor_indices = torch.as_tensor(self.motor_indices_np, dtype=torch.long, device=self.device)
         self.foot_indices = torch.as_tensor(self.foot_indices_np, dtype=torch.long, device=self.device)
@@ -286,19 +295,27 @@ class IsaacGymBackend:
         )
         self.q_des_full = torch.zeros(self.num_dofs, dtype=torch.float32, device=self.device)
         self.last_torques = torch.zeros(self.num_dofs, dtype=torch.float32, device=self.device)
-        self.previous_contacts = np.zeros(6, dtype=bool)
+        self.previous_contacts = np.zeros(self.num_legs, dtype=bool)
         self._refresh()
 
     def _create_viewer(self):
         self._viewer = self.gym.create_viewer(self.sim, self.gymapi.CameraProperties())
         if self._viewer is None:
             raise RuntimeError("failed to create Isaac Gym viewer (check DISPLAY)")
+        # 从世界原点的 -Y、+Z 一侧补光；Isaac Gym 使用方向而非点光源位置。
+        self.gym.set_light_parameters(
+            self.sim,
+            1,
+            self.gymapi.Vec3(0.8, 0.8, 0.8),
+            self.gymapi.Vec3(0.05, 0.05, 0.05),
+            self.gymapi.Vec3(0.0, -2.0**-0.5, 2.0**-0.5),
+        )
         if self._creation_initial_state is None:
             target = np.array((2.5, 3.4, 0.48), dtype=np.float64)
             camera = np.array((2.5, 4.2, 0.6), dtype=np.float64)
         else:
             target = self._creation_initial_state.W_T_R[:3, 3]
-            camera = target + np.array((0.9, 1.0, 0.6), dtype=np.float64)
+            camera = target + np.asarray(self.config.camera_offset,dtype=np.float64)
         self.gym.viewer_camera_look_at(
             self._viewer,
             None,
@@ -306,6 +323,16 @@ class IsaacGymBackend:
             self.gymapi.Vec3(*target),
         )
         self._rebuild_viewer_lines()
+        if self.config.camera_follow_robot:
+            self._update_follow_camera()
+
+    def _update_follow_camera(self):
+        # 跟随实测机身位置，偏移保持世界系方向，不随爬墙姿态滚转。
+        target = self.root_states[0,:3].detach().cpu().numpy()
+        camera = target + np.asarray(self.config.camera_offset,dtype=np.float64)
+        self.gym.viewer_camera_look_at(
+            self._viewer,None,self.gymapi.Vec3(*camera),self.gymapi.Vec3(*target)
+        )
 
     def _refresh(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
@@ -384,9 +411,11 @@ class IsaacGymBackend:
         self._require_open()
         if not isinstance(initial_state, InitialState):
             initial_state = InitialState(**initial_state)
-        adhesion_init = np.zeros(6, dtype=bool) if adhesion_init is None else np.asarray(adhesion_init)
-        if adhesion_init.shape != (6,) or adhesion_init.dtype != np.bool_:
-            raise ValueError("adhesion_init must be a boolean array with shape (6,)")
+        adhesion_init = np.zeros(self.num_legs, dtype=bool) if adhesion_init is None else np.asarray(adhesion_init)
+        if adhesion_init.shape != (self.num_legs,) or adhesion_init.dtype != np.bool_:
+            raise ValueError("adhesion_init must be a boolean array with shape (self.num_legs,)")
+        if initial_state.q.shape != (self.num_legs, 4):
+            raise ValueError("initial state does not match robot leg count")
         position, quaternion = transform_to_xyzw(initial_state.W_T_R)
         root = self.root_states[0]
         root.zero_()
@@ -411,7 +440,10 @@ class IsaacGymBackend:
         self.last_torques.zero_()
         self.contact_forces.zero_()
         self.rb_forces.zero_()
-        initial_z = np.repeat(-adhesion_init.astype(float)[:, None] * self.config.suction_force_max / 3., 3, axis=1)
+        initial_z = np.repeat(
+            -adhesion_init.astype(float)[:, None] * self.config.suction_force_max / 3.,
+            3, axis=1,
+        )
         self.rb_forces[0, self.magnetic_indices.reshape(-1), 2] = self.torch.as_tensor(
             initial_z.reshape(-1), dtype=self.rb_forces.dtype, device=self.device)
         self.previous_contacts[:] = False
@@ -427,6 +459,8 @@ class IsaacGymBackend:
             raise RuntimeError("reset(initial_state) must be called before step")
         if not isinstance(command, ActuatorCommand):
             command = ActuatorCommand(**command)
+        if command.q_des.shape != (self.num_legs, 4):
+            raise ValueError("command does not match robot leg count")
         torch = self.torch
         self.q_des_full.zero_()
         self.q_des_full[self.command_indices] = torch.as_tensor(
@@ -436,7 +470,7 @@ class IsaacGymBackend:
         contacts_np = self.contact_forces[0, self.foot_indices].detach().cpu().numpy()
         magnetic_z = self.rb_forces[
             0, self.magnetic_indices.reshape(-1), 2
-        ].view(6, 3).detach().cpu().numpy()
+        ].view(self.num_legs, 3).detach().cpu().numpy()
         updated_z, current_contacts = update_adhesion_forces(
             magnetic_z,
             contacts_np,
@@ -460,17 +494,14 @@ class IsaacGymBackend:
         motor_kp = torch.as_tensor(command.motor_kp.reshape(-1), dtype=torch.float32, device=self.device)
         motor_kd = torch.as_tensor(command.motor_kd.reshape(-1), dtype=torch.float32, device=self.device)
         motor_velocity = torch.as_tensor(command.motor_velocity.reshape(-1), dtype=torch.float32, device=self.device)
-        servo_indices = self.command_indices.view(6, 4)[:, 3]
+        servo_indices = self.command_indices.view(self.num_legs, 4)[:, 3]
         for _ in range(self.config.decimation):
             q = self.dof_states[0, :, 0]
             q_dot = self.dof_states[0, :, 1]
             torque = self.kp * (self.q_des_full - q) - self.kd * q_dot
-            if command.motor_mode == 1:
-                motor_q = q[self.motor_indices]
-                motor_dq = q_dot[self.motor_indices]
-                torque[self.motor_indices] = motor_kp * (self.q_des_full[self.motor_indices] - motor_q) + motor_kd * (motor_velocity - motor_dq) + tau_ff
-            else:
-                torque[self.motor_indices] = 0.0
+            motor_q = q[self.motor_indices]
+            motor_dq = q_dot[self.motor_indices]
+            torque[self.motor_indices] = motor_kp * (self.q_des_full[self.motor_indices] - motor_q) + motor_kd * (motor_velocity - motor_dq) + tau_ff
             disabled_servos = torch.as_tensor(~command.servo_enabled, dtype=torch.bool, device=self.device)
             torque[servo_indices[disabled_servos]] = 0.0
             torque = torch.clamp(torque, -self.torque_limits, self.torque_limits)
@@ -500,12 +531,12 @@ class IsaacGymBackend:
     def _read_state(self):
         root = self.root_states[0].detach().cpu().numpy()
         W_T_R = transform_from_xyzw(root[:3], root[3:7])
-        q = self.dof_states[0, self.command_indices, 0].detach().cpu().numpy().reshape(6, 4)
-        q_dot = self.dof_states[0, self.command_indices, 1].detach().cpu().numpy().reshape(6, 4)
-        q_torque = self.last_torques[self.motor_indices].detach().cpu().numpy().reshape(6, 3)
+        q = self.dof_states[0, self.command_indices, 0].detach().cpu().numpy().reshape(self.num_legs, 4)
+        q_dot = self.dof_states[0, self.command_indices, 1].detach().cpu().numpy().reshape(self.num_legs, 4)
+        q_torque = self.last_torques[self.motor_indices].detach().cpu().numpy().reshape(self.num_legs, 3)
         magnetic_z = self.rb_forces[
             0, self.magnetic_indices.reshape(-1), 2
-        ].detach().cpu().numpy().reshape(6, 3)
+        ].detach().cpu().numpy().reshape(self.num_legs, 3)
         adhesion_force = np.abs(magnetic_z.sum(axis=1))
         contact = self.contact_forces[0, self.foot_indices].detach().cpu().numpy()
         return RobotState(
@@ -535,6 +566,8 @@ class IsaacGymBackend:
             return
         if self.gym.query_viewer_has_closed(self._viewer):
             raise RuntimeError("Isaac Gym viewer was closed")
+        if self.config.camera_follow_robot:
+            self._update_follow_camera()
         self.gym.step_graphics(self.sim)
         self.gym.draw_viewer(self._viewer, self.sim, True)
 

@@ -1,5 +1,17 @@
 # hex_isaacgym
 
+仿真查看器可在后端 YAML 中配置相机（complex 使用 `config/complex_surface4.yaml`）：
+
+```yaml
+viewer:
+  follow_robot: true
+  camera_offset: [0.9, 1.0, 0.6]
+```
+
+`follow_robot: true` 时，每帧注视机器人机身位置，相机保持上述世界坐标系偏移（单位 m），
+不跟随机身姿态旋转。设为 `false` 时仅初始化视角，之后可用鼠标自由调整。
+修改 YAML 后重启仿真生效。省略此配置默认不跟随，headless 模式不创建相机。
+
 独立的单机器人 Isaac Gym 设备后端，不包含专家、路径执行或闭环协调器。
 专家和操作入口已迁往 hex_runner，不保留 expert_sim/expert_climb 等旧入口。
 
@@ -38,7 +50,7 @@ config/plane.yaml、complex_surface4.yaml 仅包含物理参数。
 可用 `publish_clock:=true` 发布 /clock；所有外部设备名称均支持 remap/namespace。
 
 纯物理库接口：`reset(InitialState, adhesion_init=None)`、`step(ActuatorCommand)`、`get_state()`、`close()`。
-ActuatorCommand 包含目标角、力矩、磁吸、motor_mode、六腿布尔数组 servo_enabled 及电机增益/速度。
+ActuatorCommand 包含目标角、力矩、磁吸、六腿布尔数组 servo_enabled 及电机增益/速度。
 servo_enabled 默认六腿全 true，显式传入时必须为 (6,) bool 数组；诊断同样发布该数组。
 该接口仅供物理测试使用，runner 不依赖它。
 Isaac Gym 必须先于 Torch 导入，loader 负责导入顺序。
@@ -59,3 +71,5 @@ python3 src/hex_isaacgym/scripts/test_reset.py --to-sim-info src/hex_runner/conf
 
 重力 topic 为 `std_msgs/Float64MultiArray`，data 是由实际世界重力投影得到的机身系单位向下向量。
 不再发布旧的 sensor_msgs/Imu topic。
+
+仿真内部不保存电机模式。消息 option=1/2 均使用位置、速度、kp/kd/tau 计算力矩；option=-1/0 清零电机增益及前馈力矩。舵机仍通过独立使能字段控制。

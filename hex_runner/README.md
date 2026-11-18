@@ -89,7 +89,75 @@ runner 初始化失败则不创建仿真。不靠旧文件是否存在判断就�
 sim 从该文件获取路径绘制数据，原 `/hex/reference_path` topic 已删除。
 
 收到 reset 前，runner 不发送执行器命令。runner reset 复用 Expert 的模型和缓存，
-重新初始化、写文件并发送关节目标；READY 阶段全部 foot 舵机使能，RUNNING 后恢复步态使能规则。
+重新初始化、写文件并发送一次电机（option=2）与舵机目标；READY 阶段全部 foot 舵机使能，RUNNING 后恢复步态使能规则。
+电机和舵机仅在 reset 成功、每次专家成功 compute（电机 option=1）或 disable_actuators（电机 option=-1、舵机全部失能）时各发送一次。
+空闲、暂停、完成、故障及没有新电机反馈的 tick 不重复发送缓存目标；磁吸继续按 magnetic_hz 发布。
 sim 物理 reset 重新读取文件并恢复初态和绘制路径。两种 reset 独立，不因文件修改自动重置物理机器人。
 操作时先暂停控制，再完成需要的 runner 初始化文件更新，最后触发 sim reset；不要同时重写和读取该文件。
 单独启动 sim 时，文件不存在或无法读取会直接报错退出。
+
+## complex 初始位姿
+
+可以用 `initial_state.waypoint_index: 0` 选择 `resources.se3_path` 中的原始路标点，
+索引从 0 开始，同时取得位置和朝向，不受 dense 加密点数量影响。
+runner 只传递索引；ExpertComplex 在轨迹加载后解析它。reset 使用相同选择，
+仿真初态导出使用专家成功初始化的实际位姿。参考路径不会被裁剪。
+
+```yaml
+initial_state:
+  waypoint_index: 0
+  # 其余 groups、stance_group、ik_branch、magnetic、servo_enabled 保持原配置
+```
+
+也可以继续手写位姿，`pose` 与 `waypoint_index` 必须且只能提供一个：
+
+```yaml
+initial_state:
+  pose:
+    position: {x: 2.3104510167678747, y: 4.4763037345614, z: 0.18266166870934133}
+    orientation: {x: 0.00008323880732471449, y: 0.10452843012500451, z: 0.9945215800370322, w: 0.0007919643604078812}
+  # 其余初态字段保持原配置
+```
+
+`waypoint_index` 仅用于 complex，必须为非负整数；越界或所选位姿无法完成环境／IK
+初始化时直接报错，不自动换点。climb 继续使用 `initial_state.pose`。
+
+## 四足单腿循环攀爬
+
+```bash
+source devel/setup.bash
+roslaunch hex_runner sim.launch mode:=quad_climb
+# 仅运行控制入口：
+roslaunch hex_runner runner.launch mode:=quad_climb
+```
+
+`config/quad_climb.yaml` 使用四足 URDF，编号固定为
+`0=lf、1=lb、2=rf、3=rb`。通过 `initial_state.sequence: [0, 3, 1, 2]`
+指定逐腿摆动顺序，从第一项开始循环；四足不再接受 `groups` 或 `stance_group`。
+六足 climb、complex 仍使用原有分组配置。
+
+初态四脚均为 stance、磁吸全开，足端高度为 `-stance_height`。
+调用 `/hex/runner/reset` 后，向 `/hex/cmd_vel` 发送速度启动：
+先等待四脚确认吸附，再释放首腿；释放确认后只有该腿摆动，其余三脚移动。
+实测足端到达高点（距离不超过 5 mm）后开启磁吸并下降，下降时摆动腿的平面运动使用反向速度指令，与支撑腿相反。
+摆动速度倍率为 2：抬腿回位、下降及摆动腿平面运动加速，支撑腿速度保持原值；抬腿和下降速度上限为 1.2 m/s。
+连续受压且法向运动接近停止后确认触地，立即设为 stance，以实测触点重建目标，
+四脚共同移动。四脚均确认吸附后再释放下一腿，触地同周期不会直接释放下一腿。
+磁吸确认本身不会把空中脚设为 stance。
+
+发送零速度保持目标和循环位置；恢复速度后继续，reset 从首腿重新开始。
+诊断增加 `gait_phase`（WAIT_ATTACH、RELEASE、LIFT、DESCEND）、
+`swing_leg_index`（启动等待时为 null；其后表示本次选中腿）、
+`sequence`、`sequence_index`。`gait_switch_count` 表示实际开始单腿摆动的次数。
+
+ROS 消息保留六腿字段，控制和反馈仅映射四条腿；中腿命令为零或关闭，
+中腿无效反馈不阻止四足运行。仿真使用 `quad_plane.yaml`，实机驱动配置仍需单独适配。
+舵机使能为 `~gaits`，支撑时被动、摆动时跟踪目标；重力补偿使用当前支撑腿，
+保留限幅和平滑。`support_moment_residual_R` 为分配阶段、限幅前的机身系剩余力矩（N·m）。
+
+```bash
+python3 src/hex_runner/scripts/test_ros_integration.py --backend fake --mode quad_climb
+# 五次开始摆动覆盖 0→3→1→2→0；CPU 运行速度可能低于实时。
+python3 src/hex_runner/scripts/test_ros_integration.py --backend isaac --mode quad_climb \
+  --device cpu --motion-seconds 180 --min-gait-switches 5
+```

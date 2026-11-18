@@ -2,5 +2,6 @@
 
 from .expert_complex import ExpertComplex, se3_vee
 from .expert_climb import ExpertClimb
+from .expert_quad_climb import ExpertQuadClimb
 
-__all__ = ["ExpertClimb", "ExpertComplex", "se3_vee"]
+__all__ = ["ExpertQuadClimb", "ExpertClimb", "ExpertComplex", "se3_vee"]

@@ -13,7 +13,7 @@ from std_srvs.srv import Trigger, TriggerResponse
 from dm_motor_fusion.msg import MultiLegCommand, MultiLegState
 from feetech_servo.msg import servo_cmd, servo_state
 from magnetic.msg import MagneticCmd, MagneticState
-from hex_kinematic.ros_contract import read_motor, read_servo, read_servo_enabled, read_magnetic, write_magnetic, write_motor, write_servo
+from hex_kinematic.ros_contract import write_valid, read_motor, read_servo, read_servo_enabled, read_magnetic, write_magnetic, write_motor, write_servo
 from hex_kinematic.se3_utils import transform_to_xyzw
 from .config import SimulationConfig
 from .types import ActuatorCommand
@@ -49,17 +49,17 @@ class SimulationNode:
         rospy.on_shutdown(self.backend.close)
 
     def _initial_command(self):
-        return ActuatorCommand(self.config.initial_state.q.copy(), np.zeros((6, 3)), self.config.magnets.copy(),
-                               motor_mode=self.config.motor_mode, servo_enabled=np.full(6, self.config.servo_enabled, dtype=bool))
+        return ActuatorCommand(self.config.initial_state.q.copy(), np.zeros((len(self.config.leg_names), 3)), self.config.magnets.copy(),
+                               servo_enabled=np.full(len(self.config.leg_names), self.config.servo_enabled, dtype=bool))
 
     def _motor(self, message):
-        if message.option not in (-1, 0, 1):
+        if message.option not in (-1, 0, 1, 2):
             rospy.logwarn_throttle(1., "sim rejects unsupported motor mode %s", message.option)
             return
         try:
             with self.lock:
-                if message.option == 1:
-                    pos, tau, velocity, kp, kd = [read_motor(message, name)
+                if message.option in (1, 2):
+                    pos, tau, velocity, kp, kd = [read_motor(message, name, self.config.leg_names)
                                                 for name in ("pos", "tau", "vel", "kp", "kd")]
                     if not all(np.isfinite(value).all() for value in (pos, tau, velocity, kp, kd)):
                         raise ValueError("motor fields must be finite")
@@ -70,15 +70,19 @@ class SimulationNode:
                     self.command.motor_velocity = velocity
                     self.command.motor_kp = kp
                     self.command.motor_kd = kd
-                self.command.motor_mode = message.option
+                else:
+                    self.command.motor_kp.fill(0.)
+                    self.command.motor_kd.fill(0.)
+                    self.command.motor_velocity.fill(0.)
+                    self.command.tau_ff.fill(0.)
         except ValueError as error:
             rospy.logwarn_throttle(1., "invalid motor command: %s", error)
 
     def _servo(self, message):
         try:
             with self.lock:
-                enabled = read_servo_enabled(message)
-                angles = read_servo(message)
+                enabled = read_servo_enabled(message, self.config.leg_names)
+                angles = read_servo(message, self.config.leg_names)
                 if not np.isfinite(angles[enabled]).all():
                     raise ValueError("enabled servo angles must be finite")
                 self.command.q_des[enabled, 3] = angles[enabled]
@@ -88,7 +92,7 @@ class SimulationNode:
 
     def _magnetic(self, message):
         with self.lock:
-            self.command.adhesions = read_magnetic(message)
+            self.command.adhesions = read_magnetic(message, leg_names=self.config.leg_names)
 
     def _reset(self, _request):
         with self.lock:
@@ -119,21 +123,22 @@ class SimulationNode:
         stamp = rospy.Time.from_sec(state.sim_time) if self.clock_pub is not None else rospy.Time.now()
         if self.clock_pub is not None:
             self.clock_pub.publish(Clock(clock=stamp))
-        motor = MultiLegState(option=command.motor_mode)
+        motor = MultiLegState(option=1)  # Simulator always uses torque control.
         motor.header.stamp = stamp
-        motor.valid = [True] * 18
+        write_valid(motor, self.config.leg_names, motor=True)
         for suffix, values in (("pos", state.q[:, :3]), ("vel", state.q_dot[:, :3]), ("tau", state.q_torque)):
-            write_motor(motor, suffix, values)
+            write_motor(motor, suffix, values, self.config.leg_names)
         self.motor_pub.publish(motor)
-        servo = servo_state(valid=[True] * 6)
+        servo = servo_state()
+        write_valid(servo, self.config.leg_names)
         servo.header.stamp = stamp
-        write_servo(servo, state.q[:, 3])
+        write_servo(servo, state.q[:, 3], self.config.leg_names)
         self.servo_pub.publish(servo)
         attached = attachment_ratio(state.adhesion_force, self.config.backend.suction_force_max)
         magnetic = MagneticState()
-        write_magnetic(magnetic, command.adhesions, "enabled_")
-        write_magnetic(magnetic, attached, "attached_")
-        write_magnetic(magnetic, [True] * 6, "valid_")
+        write_magnetic(magnetic, command.adhesions, "enabled_", self.config.leg_names)
+        write_magnetic(magnetic, attached, "attached_", self.config.leg_names)
+        write_magnetic(magnetic, [True] * len(self.config.leg_names), "valid_", self.config.leg_names)
         magnetic.header.stamp = stamp
         self.magnetic_pub.publish(magnetic)
         position, quaternion = transform_to_xyzw(state.W_T_R)
@@ -146,10 +151,10 @@ class SimulationNode:
         self.gravity_pub.publish(Float64MultiArray(data=direction.tolist()))
         status = DiagnosticStatus(name="hex_sim", hardware_id="isaacgym", level=0, message="RUNNING")
         values = dict(sim_time=state.sim_time, run_elapsed=state.run_elapsed, reset_count=self.reset_count,
-                      motor_mode=command.motor_mode, servo_enabled=command.servo_enabled.tolist(),
+                      servo_enabled=command.servo_enabled.tolist(),
                       adhesion_force=state.adhesion_force.tolist(), contact_force_norm=np.linalg.norm(state.contact_forces, axis=1).tolist(),
                       motor_torque_max=float(np.abs(state.q_torque).max()),
-                      servo_torque_max=float(self.backend.last_torques[self.backend.command_indices.view(6, 4)[:, 3]].abs().max().item()))
+                      servo_torque_max=float(self.backend.last_torques[self.backend.command_indices.view(len(self.config.leg_names), 4)[:, 3]].abs().max().item()))
         status.values = [KeyValue(key, json.dumps(value)) for key, value in values.items()]
         message = DiagnosticArray(status=[status])
         message.header.stamp = stamp

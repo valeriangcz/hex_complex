@@ -35,7 +35,9 @@ def update_adhesion_forces(
     force_max=300.0,
     contact_threshold=1.0,
 ):
-    """Update the three local-z magnetic forces for each leg.
+    """Update one or three local-z magnetic forces per leg.
+
+    Force limits and increments are per-leg totals, shared across points.
 
     Negative values are the source ``rb_forces`` convention. The backend
     applies their negation in Isaac Gym local coordinates.
@@ -44,12 +46,13 @@ def update_adhesion_forces(
     contact_forces = np.asarray(contact_forces, dtype=np.float64)
     previous_contacts = np.asarray(previous_contacts, dtype=bool)
     enabled = np.asarray(enabled, dtype=bool)
-    if previous_z.shape != (6, 3):
-        raise ValueError("previous_z must have shape (6, 3)")
-    if contact_forces.shape != (6, 3):
-        raise ValueError("contact_forces must have shape (6, 3)")
-    if previous_contacts.shape != (6,) or enabled.shape != (6,):
-        raise ValueError("previous_contacts and enabled must have shape (6,)")
+    if previous_z.ndim != 2 or previous_z.shape[0] not in (4, 6) or previous_z.shape[1] not in (1, 3):
+        raise ValueError("previous_z must have shape (6, 1) or (n, 3)")
+    n, point_count = previous_z.shape
+    if contact_forces.shape != (n, 3):
+        raise ValueError("contact_forces must have shape (n, 3)")
+    if previous_contacts.shape != (n,) or enabled.shape != (n,):
+        raise ValueError("previous_contacts and enabled must have shape (n,)")
 
     contacts = np.linalg.norm(contact_forces, axis=1) > float(contact_threshold)
     filtered = contacts | previous_contacts
@@ -57,7 +60,7 @@ def update_adhesion_forces(
     if in_initial_buffer:
         filtered[:] = True
         rate[enabled] = -1000.0
-    updated = previous_z + rate[:, None] * (float(force_delta) / 3.0)
+    updated = previous_z + rate[:, None] * (float(force_delta) / point_count)
     updated *= filtered[:, None]
-    updated = np.clip(updated, -float(force_max) / 3.0, 0.0)
+    updated = np.clip(updated, -float(force_max) / point_count, 0.0)
     return updated, contacts

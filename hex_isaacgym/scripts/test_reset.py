@@ -33,8 +33,12 @@ def main():
             np.testing.assert_allclose(state.adhesion_force,magnets*config.backend.suction_force_max)
             force=backend.rb_forces[0,backend.magnetic_indices.reshape(-1),2].view(6,3).cpu().numpy()
             np.testing.assert_allclose(force,np.repeat(-magnets.astype(float)[:,None]*config.backend.suction_force_max/3.,3,axis=1))
+            np.testing.assert_allclose(backend.rb_positions[0,backend.magnetic_indices.reshape(-1)].cpu().numpy(),
+                                       np.tile([[0.,.02,.009],[.02*np.sqrt(3.),-.01,0.],[-.02*np.sqrt(3.),-.01,0.]],(6,1)))
             assert state.sim_time==before and state.run_elapsed==0
             next_state=backend.step(ActuatorCommand(initial.q,np.zeros((6,3)),magnets))
+            np.testing.assert_allclose(next_state.adhesion_force,
+                np.abs(backend.rb_forces[0,backend.magnetic_indices.reshape(-1),2].view(6,3).cpu().numpy().sum(axis=1)))
             assert next_state.sim_time>state.sim_time
             before=next_state.sim_time
         np.testing.assert_allclose(backend.reset(initial).adhesion_force,0)

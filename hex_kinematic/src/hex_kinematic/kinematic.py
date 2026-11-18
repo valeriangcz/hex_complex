@@ -8,12 +8,15 @@ from typing import List, Tuple, Union
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
-from .conventions import LEG_NAMES
+from .conventions import LEG_NAMES, robot_leg_names
 
 class Kinematic:
     def __init__(self,l1=0.072,l2=0.13,l3=0.17,
                  bx=0.1,by=0.22,
                  singularity_threshold=0.02,urdf_path=None):
+        self.leg_names = robot_leg_names(urdf_path) if urdf_path is not None else LEG_NAMES
+        self.num_legs = len(self.leg_names)
+        self._left_legs = np.array([name.startswith("l") for name in self.leg_names])
         self.l1=l1
         self.l2=l2
         self.l3=l3
@@ -24,7 +27,7 @@ class Kinematic:
                                      [-np.pi*2.0/3.0, np.pi*25.0/36.0],
                                      [-np.pi*31.0/36.0, np.pi*7.0/9.0]],dtype=np.float32)
         # 这里保存每条腿thigh关节的
-        self.joints_limits_thigh = np.zeros((6,2),dtype=np.float32)
+        self.joints_limits_thigh = np.zeros((self.num_legs,2),dtype=np.float32)
         self.joints_limits_rest = np.array(
             [[radians(-140),radians(135)],[radians(-150),radians(165)]],
             dtype=np.float32,
@@ -32,7 +35,7 @@ class Kinematic:
         #机器人身体的参数，腿部基坐标在R系下基座的位置
         self._bx = bx
         self._by = by
-        self._leg_names=list(LEG_NAMES)
+        self._leg_names=list(self.leg_names)
         for i,name in enumerate(self._leg_names):
             if name=="lf" or name =="rb":
                 self.joints_limits_thigh[i]=[radians(-92),radians(40)]
@@ -40,7 +43,7 @@ class Kinematic:
                 self.joints_limits_thigh[i]=[radians(-40),radians(92)]
             else:
                 self.joints_limits_thigh[i]=[radians(-40),radians(40)]
-        self.leg_base_p = np.zeros((3,6),dtype=np.float32)
+        self.leg_base_p = np.zeros((3,self.num_legs),dtype=np.float32)
         for i,name in enumerate(self._leg_names):
             #保存腿部基坐标原点在身体坐标系下的位置
             bx = self._bx
@@ -163,8 +166,8 @@ class Kinematic:
         if self._mass_model is None:
             raise RuntimeError("ForwardKinAll requires Kinematic(..., urdf_path=...)" )
         joints = np.asarray(joints,dtype=np.float64)
-        if joints.shape != (6,4) or not np.isfinite(joints).all():
-            raise ValueError("joints must be a finite array with shape (6, 4)")
+        if joints.shape != (self.num_legs,4) or not np.isfinite(joints).all():
+            raise ValueError("joints must be a finite array with shape (num_legs, 4)")
 
         model = self._mass_model
         geometry = model["geometry"]
@@ -204,19 +207,19 @@ class Kinematic:
             ),q1
         )
         p_foot = point_after_foot(coms[:,3])
-        ball_local = np.broadcast_to(geometry["ball_offset"]*ex,(6,3))
+        ball_local = np.broadcast_to(geometry["ball_offset"]*ex,(self.num_legs,3))
         p_ball = point_after_foot(ball_local)
         p_suck = point_after_foot(ball_local+rotate_y_90(coms[:,6]))
         toe_local = np.broadcast_to(
-            (geometry["ball_offset"]+geometry["toe_offset"])*ex,(6,3)
+            (geometry["ball_offset"]+geometry["toe_offset"])*ex,(self.num_legs,3)
         )
         p_toe = point_after_foot(toe_local)
         link_com_B = np.stack(
             (p_thigh,p_knee,p_ankle,p_foot,p_ball,p_ball,p_suck,p_toe),axis=1
         )
-        B_foot = point_after_foot(np.zeros((6,3),dtype=np.float64))
+        B_foot = point_after_foot(np.zeros((self.num_legs,3),dtype=np.float64))
         leg_com_B = np.einsum("li,lij->lj",masses,link_com_B)/masses.sum(axis=1)[:,None]
-        leg_com_R = self._B2R(leg_com_B.T,np.arange(6)).T
+        leg_com_R = self._B2R(leg_com_B.T,np.arange(self.num_legs)).T
 
         weighted_com = model["body_mass"]*model["body_com_R"]
         weighted_com += np.einsum("l,lj->j",self.leg_masses,leg_com_R)
@@ -303,13 +306,13 @@ class Kinematic:
         if vectors.ndim != 2 or vectors.shape[0] != 3:
             raise ValueError("leg_vectors must have shape (3, N)")
         if np.isscalar(leg_indices):
-            if int(leg_indices) < 3:
+            if self._left_legs[int(leg_indices)]:
                 vectors[:2, :] *= -1.0
             return vectors
         indices = np.asarray(leg_indices,dtype=int).ravel()
         if vectors.shape[1] != indices.size:
             raise ValueError("leg_indices must match the vector count")
-        vectors[:2,indices<3] *= -1.0
+        vectors[:2,self._left_legs[indices]] *= -1.0
         return vectors
 
     def RVectorToLeg(self,R_vectors:np.ndarray,leg_indices:Union[np.ndarray,int])->np.ndarray:
@@ -748,7 +751,7 @@ class Kinematic:
         # ---------- 情况 1：scalar ----------
         if np.isscalar(leg_indices):
             leg = int(leg_indices)
-            if leg < 3:  # 左腿规则
+            if self._left_legs[leg]:  # 左腿规则
                 R_point[0:2, :] = self.leg_base_p[0:2, leg:leg+1] - B_point[0:2, :]
             else:        # 右腿规则
                 R_point[0:2, :] = self.leg_base_p[0:2, leg:leg+1] + B_point[0:2, :]
@@ -757,8 +760,8 @@ class Kinematic:
         # ---------- 情况 2：array ----------
         idx = np.asarray(leg_indices, dtype=int).ravel()
         cols = np.arange(idx.size)
-        left_cols = cols[idx<3]
-        right_cols = cols[idx>=3]
+        left_cols = cols[self._left_legs[idx]]
+        right_cols = cols[~self._left_legs[idx]]
         if left_cols.size:
             R_point[0:2, left_cols] = self.leg_base_p[0:2, idx[left_cols]] - B_point[0:2, left_cols]
         if right_cols.size:
@@ -773,7 +776,7 @@ class Kinematic:
         # ---------- 情况 1：scalar -> broadcast ----------
         if np.isscalar(leg_indices):
             leg = int(leg_indices)
-            if leg < 3:  # 左腿规则：B = leg_base_p - R
+            if self._left_legs[leg]:  # 左腿规则：B = leg_base_p - R
                 B_point[0:2, :] = self.leg_base_p[0:2, leg:leg+1] - R_point[0:2, :]
             else:        # 右腿规则：B = R - leg_base_p
                 B_point[0:2, :] = R_point[0:2, :] - self.leg_base_p[0:2, leg:leg+1]
@@ -782,8 +785,8 @@ class Kinematic:
         # ---------- 情况 2：array -> 按列索引 ----------
         idx = np.asarray(leg_indices, dtype=int).ravel()
         cols = np.arange(idx.size)
-        left_cols = cols[idx<3]
-        right_cols = cols[idx>=3]
+        left_cols = cols[self._left_legs[idx]]
+        right_cols = cols[~self._left_legs[idx]]
         if left_cols.size:
             B_point[0:2, left_cols] = self.leg_base_p[0:2, idx[left_cols]] - R_point[0:2, left_cols]
         if right_cols.size:
@@ -828,7 +831,7 @@ if __name__ == '__main__':
     # print(joint_cur)
     # print(pos_des)
 
-    # chs.PointsInPoly(np.random.random((3,6)),np.arange(6))
+    # chs.PointsInPoly(np.random.random((3,self.num_legs)),np.arange(self.num_legs))
 
     # chs.FarestPoints(np.array([[0.3,0,0.1],[0.3,0.1,0.06]]).T,np.array([[0,0,1],[0,1,0]]).T,5)
     # point,ch_index = chs.FarestPoint(np.array([0.3,0,0.1])[:,None],np.array([0,0,1])[:,None],5)
@@ -845,10 +848,10 @@ if __name__ == '__main__':
     # res = chs.body_coeff_abcd[:,0:3] @ point + chs.body_coeff_abcd[:,3,None]
     # zero_index = np.where(res==0)[0]
     pass
-    # points = np.random.rand(3,6)
+    # points = np.random.rand(3,self.num_legs)
     # points = np.array([[0.2,0.0,0.05],[0.32,0,0.1]]).T
     # leg_ids = np.array([5,5])
-    # # norms = np.random.rand(3,6)
+    # # norms = np.random.rand(3,self.num_legs)
     # norms = np.array([[0,0,1],[0,0.2,0.98]]).T
 
     # chs.PointInsidePoly(points,norms,leg_ids)

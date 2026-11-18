@@ -901,34 +901,32 @@ class HexState:
 
     # 在线工作空间、承载力与法向硬判据；角度统一用度配置。
     # LEG_MIN_RADIUS = 0.14  # m，距腿基原点的最小半径
-    LEG_BOUNDARY_HARD_MARGIN= 0.03
+    LEG_BOUNDARY_HARD_MARGIN= 0.02
     LEG_BOUNDARY_SOFT_MARGIN = 0.05  # m
     LEG_BOUNDARY_COST_SCALE = 0.03  # m
 
-    LEG_FORCE_HARD_MARGIN = 90.0  # N，位姿检查及代价中的可行点计数
+    LEG_FORCE_HARD_MARGIN = 85.0  # N，位姿检查及代价中的可行点计数
     LEG_FORCE_SOFT_MARGIN = 100.0  # N，低于该值产生力惩罚
     LEG_FORCE_COST_SCALE = 10.0  # N
 
-
-    LEG_PLANE_HARD_ANGLE_DEG = 15.0
-    LEG_PLANE_SOFT_ANGLE_DEG = 20.0
+    LEG_PLANE_HARD_ANGLE_DEG = 22.0
+    LEG_PLANE_SOFT_ANGLE_DEG = 10.0
     LEG_PLANE_COST_SCALE = 10.0  # deg
 
-
     LEG_XB3_HARD_ANGLE_DEG = 85.0
-    LEG_XB3_SOFT_ANGLE_DEG = 95.0
+    LEG_XB3_SOFT_ANGLE_DEG = 70.0
     LEG_XB3_COST_SCALE = 10.0  # deg
     LEG_XB3_TRANSITION_DEG = 10.0  # deg，plane 惩罚混合过渡，与 xb3 代价尺度独立
 
-    LEG_ANKLE_HARD_MARGIN = 0.05  # m
-    LEG_ANKLE_SOFT_MARGIN = 0.06  # m
+    LEG_ANKLE_HARD_MARGIN = 0.06  # m
+    LEG_ANKLE_SOFT_MARGIN = 0.1  # m
     LEG_ANKLE_COST_SCALE = 0.03  # m，净空不足该尺度时 ankle 代价为 1
 
-    LEG_END_HARD_CLEARANCE = 0.03  # m
-    LEG_LEG_END_HARD_CLEARANCE = 0.05  # m，不同腿足端间距
+    LEG_END_HARD_CLEARANCE = 0.04  # m
+    LEG_LEG_END_HARD_CLEARANCE = 0.06  # m，不同腿足端间距
 
     # 腿部软代价尺度，与硬判据分开配
-    COST_TARGET_FOOTHOLDS = 6  # 每腿目标数量及最优候选聚合数量
+    COST_TARGET_FOOTHOLDS = 30  # 每腿目标数量及最优候选聚合数量
 
     # 修改集中参数后重新创建对象；不在运行中自动同步下层对象或缓存。
 
@@ -1542,12 +1540,16 @@ class HexState:
         norm_feasi_mask = self._LegNormFeasi(R_points,R_normals,leg_indices)[np.arange(R_points.shape[0]),sol_indices] #leg_size,2
         # print("norm_feasi_mask=",norm_feasi_mask)
         if not norm_feasi_mask.all():
+            print("stance not feasible norm_feasi_mask=",norm_feasi_mask,flush=True)
             return False
         #计算点所在的的体素索引
         B_points = self.robot_voxels.kin._R2B(R_points.T,leg_indices).T #N,3
         #检查体素内可行性
-        if not self.robot_voxels.leg_voxels.IsInsideRange(B_points).all():
+        inside_range_maks = self.robot_voxels.leg_voxels.IsInsideRange(B_points)
+        if not inside_range_maks.all():
+            print("stance not feasible inside range=",inside_range_maks,flush=True)
             return False
+        
         flat_index = self.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
 
         # reachable_mask = self.robot_voxels.robot_reachable_legs[flat_index,sol_indices,leg_indices]#N
@@ -1567,14 +1569,10 @@ class HexState:
         self.env_pointsmap_voxels.voxels.TrilinearSample(self.env_pointsmap_voxels.env_esdf,ankle_pos,outside_value=0.04) >= \
         self.robot_voxels.leg_voxels.ankle_collide_radi
 
-        # ix,iy,iz = self.env_pointsmap_voxels.voxels.Pos2GridIndex(ankle_pos).T
-
-        # ankle_free_mask = (self.env_pointsmap_voxels.env_esdf[ix,iy,iz]>=
-        #                    self.robot_voxels.leg_voxels.ankle_collide_radi)
-        # print("reachable_mask=",reachable_mask)
-        # print("ankle_free_mask=",ankle_free_mask)
-        # if not ((reachable_mask&ankle_free_mask).all()):
-        #     print(f"stance not feasible  reachable_mask={reachable_mask}, ankle_free_mask={ankle_free_mask}")
+        if not ((reachable_mask&ankle_free_mask).all()):
+            print(f"stance not feasible, \
+                  reachable_mask={reachable_mask}, \
+                  ankle_free_mask={ankle_free_mask}",flush=True)
 
         return (reachable_mask&ankle_free_mask).all()
         # return (inside_mask&ankle_free_mask).all()

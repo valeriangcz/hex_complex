@@ -6,15 +6,29 @@ import numpy as np
 
 
 LEG_NAMES = ("lb", "lf", "lm", "rb", "rf", "rm")
+QUAD_LEG_NAMES = ("lf", "lb", "rf", "rb")
+
+
+def robot_leg_names(urdf_path):
+    """Recognize supported robot layouts independently of XML joint order."""
+    import xml.etree.ElementTree as ET
+    names = {j.get("name")[2:-6] for j in ET.parse(urdf_path).getroot().findall("joint")
+             if j.get("name", "").startswith("j_") and j.get("name", "").endswith("_thigh")}
+    for layout in (LEG_NAMES, QUAD_LEG_NAMES):
+        if names == set(layout):
+            return layout
+    raise ValueError("Unsupported URDF leg layout: {}".format(sorted(names)))
+
+
 MOTOR_JOINT_NAMES = ("thigh", "knee", "ankle")
 COMMAND_JOINT_NAMES = MOTOR_JOINT_NAMES + ("foot",)
 
 
-def joint_names(parts=COMMAND_JOINT_NAMES):
+def joint_names(parts=COMMAND_JOINT_NAMES, leg_names=LEG_NAMES):
     """Return URDF joint names in leg-major order."""
     return tuple(
         "j_{}_{}".format(leg, part)
-        for leg in LEG_NAMES
+        for leg in leg_names
         for part in parts
     )
 

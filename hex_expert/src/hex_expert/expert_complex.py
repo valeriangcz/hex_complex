@@ -27,7 +27,7 @@ class ExpertComplex:
                  control_dt=0.01,v_max=0.08,w_max=0.2,stance_maxmove_t=0.2,stance_maxmove_w=0.4,
                  magnetic_attach_above=0.85,magnetic_release_below=0.05, *, groups, stance_group,
                  robot_urdf=None,resources=None,initial_pose=None,ik_branch=None,magnetic=None,
-                 motor_torque_limits=27.0):
+                 motor_torque_limits=27.0,initial_waypoint_index=None,landing_cost_weights=None):
         # self.body_offset_x = 0.1
         # self.body_offset_y = 0.22
         # self.body_shape=np.zeros((3,6))
@@ -37,6 +37,16 @@ class ExpertComplex:
         # self.body_shape[1,[1,4]] = self.body_offset_y
 
         self.singularity_threshold = singularity_threshold
+        self.landing_cost_weights = dict(xb3=1.0,plane=2.0,boundary=1.0,force=1.0,distance=0.2,
+                                         neighbor_end=1.0,neighbor_ankle=1.0)
+        if landing_cost_weights is not None:
+            if set(landing_cost_weights)-set(self.landing_cost_weights):
+                raise ValueError("unknown landing_cost_weights key")
+            self.landing_cost_weights.update(landing_cost_weights)
+        if any(not np.isfinite(w) or w < 0 for w in self.landing_cost_weights.values()):
+            raise ValueError("landing_cost_weights must be finite and nonnegative")
+        if not any(self.landing_cost_weights.values()):
+            raise ValueError("landing_cost_weights must contain a positive weight")
         self.singularity_legs = np.zeros((6,),dtype=np.bool_) #进入奇异点，设置为1
         self.dt = control_dt # s
         self.v_max = v_max # m/s
@@ -70,6 +80,8 @@ class ExpertComplex:
         self.last_gaits = self.gaits.copy()
 
         self.path_se3 = None #外界输入的参考轨迹
+        self._initial_waypoints = ()
+        self.initial_pose = None
         self.follow_path_index = 0
         self.interp_path_se3:List = [] #根据当前位置插值计算的轨迹，与当前stance轨迹长度相同，与索引对应
         self.interp_path_T: List|np.array = [] #放入N*4*4的interp_path_se3，便于_Cal_Cost的时候批量计算
@@ -129,8 +141,10 @@ class ExpertComplex:
             from hex_se3 import load_trajectory
             document = load_trajectory(resources["se3_path"])
             self.LoadSE3(list(document.dense.poses if document.dense is not None else document.waypoints))
-        if initial_pose is not None:
-            self.SetInitBySE3(ik_branch=ik_branch,initial_pose=initial_pose)
+            self._initial_waypoints = tuple(pose.copy() for pose in document.waypoints)
+        if initial_pose is not None or initial_waypoint_index is not None:
+            self.SetInitBySE3(ik_branch=ik_branch,initial_pose=initial_pose,
+                              initial_waypoint_index=initial_waypoint_index)
             if magnetic is not None:
                 self.adhesions[:] = magnetic
 
@@ -140,26 +154,122 @@ class ExpertComplex:
         if any(not isinstance(pose,SE3) or not np.isfinite(pose.A).all() for pose in path_se3):
             raise ValueError("path_se3 must contain only finite spatialmath.SE3 poses")
         self.path_se3 = [pose.copy() for pose in path_se3]
+        self._initial_waypoints = ()
         self.follow_path_index = 0
         self.interp_path_se3.clear()
         self.interp_path_T = []
         self._path_positions = np.array([pose.t for pose in self.path_se3])
         self._path_rotations = np.array([pose.R for pose in self.path_se3])
 
-    def SetInitBySE3(self,attached:np.ndarray|None=None,*,ik_branch=None,initial_pose:SE3|None=None):
+    def _ResolveInitialPose(self,initial_pose=None,initial_waypoint_index=None):
+        if initial_pose is not None and initial_waypoint_index is not None:
+            raise ValueError("initial_pose and initial_waypoint_index are mutually exclusive")
+        if initial_waypoint_index is not None:
+            if type(initial_waypoint_index) is not int or initial_waypoint_index < 0:
+                raise ValueError("initial_waypoint_index must be a nonnegative integer")
+            if not self._initial_waypoints:
+                raise ValueError("initial_waypoint_index requires original waypoints loaded from resources.se3_path")
+            if initial_waypoint_index >= len(self._initial_waypoints):
+                raise ValueError(
+                    f"initial_waypoint_index={initial_waypoint_index} is out of range; "
+                    f"valid range is 0..{len(self._initial_waypoints)-1}"
+                )
+            pose = self._initial_waypoints[initial_waypoint_index]
+        else:
+            pose = self.path_se3[0] if initial_pose is None else initial_pose
+        if not isinstance(pose,SE3) or not np.isfinite(pose.A).all():
+            raise ValueError("initial_pose must be a finite SE3 pose")
+        return pose.copy()
+
+    def _SelectLandingPointByPlaneAngle(self,R_points:np.ndarray,R_normals:np.ndarray,leg_index:int)->int:
+        """从 R 系候选点和表面法向（均为 N,3）中选取法向与连杆平面夹角最小的点。"""
+        plane_normals = np.column_stack([
+            self.kin.leg_base_p[1,leg_index]-R_points[:,1],
+            R_points[:,0]-self.kin.leg_base_p[0,leg_index],
+            np.zeros(R_points.shape[0]),
+        ])
+        plane_normals /= np.maximum(np.linalg.norm(plane_normals,axis=1,keepdims=True),1e-5)
+        normals = R_normals/np.maximum(np.linalg.norm(R_normals,axis=1,keepdims=True),1e-5)
+        # 向量与平面的夹角为 asin(|n·pn|)，直接比较绝对点积即可；并列时取首个候选点。
+        scores = np.abs(np.sum(normals*plane_normals,axis=1))
+        return int(np.argmin(scores))
+
+    def _SelectLandingPoint(self,R_points:np.ndarray,R_normals:np.ndarray,leg_index:int,
+                            current_R_point:np.ndarray,reference_R_points:np.ndarray|None=None)->int:
+        """在现有可行候选中按加权代价选点；所有位置/法向均为目标机身 R 系。
+
+        角度按硬上限归一化；边界和承载力低于软阈值时惩罚，
+        移动距离按 0.1 m 归一化。权重通过 landing_cost_weights 设置。
+        reference_R_points 为本轮固定的六腿参考末端 (6,3)，用于相邻腿间距评分。
+        """
+        h = self.hex_state
+        v = h.robot_voxels.leg_voxels
+        B_points = self.kin._R2B(R_points.T,leg_index).T
+        flat = v.Pos2FlatIndex(B_points)
+        normals = R_normals/np.maximum(np.linalg.norm(R_normals,axis=1,keepdims=True),1e-5)
+        pn = np.column_stack([self.kin.leg_base_p[1,leg_index]-R_points[:,1],
+                              R_points[:,0]-self.kin.leg_base_p[0,leg_index],np.zeros(len(R_points))])
+        pn /= np.maximum(np.linalg.norm(pn,axis=1,keepdims=True),1e-5)
+        plane = np.arcsin(np.clip(np.abs(np.sum(normals*pn,axis=1)),0,1))
+        B_normals = self.kin.RVectorToLeg(normals.T,leg_index).T
+        xb3 = v.x_b3[flat,self.q3_branches[leg_index]]
+        xb3_angle = np.arccos(np.clip(np.sum(xb3*(-B_normals),axis=1),-1,1))
+        boundary = h.robot_voxels.to_bound_dist_flat[flat,leg_index]
+        force = v.mechanical_margin[flat]
+        terms = dict(
+            xb3=(xb3_angle/np.deg2rad(h.LEG_XB3_HARD_ANGLE_DEG))**2,
+            plane=(plane/np.deg2rad(h.LEG_PLANE_HARD_ANGLE_DEG))**2,
+            boundary=(np.maximum(h.LEG_BOUNDARY_SOFT_MARGIN-boundary,0)/h.LEG_BOUNDARY_COST_SCALE)**2,
+            force=(np.maximum(h.LEG_FORCE_SOFT_MARGIN-force,0)/h.LEG_FORCE_COST_SCALE)**2,
+            distance=(np.linalg.norm(R_points-np.asarray(current_R_point).reshape(1,3),axis=1)/0.1)**2,
+        )
+        # 四角腿比较同侧中腿，中腿比较同侧前后两腿；先平均距离再求代价。
+        neighbors = np.asarray(((2,),(2,),(0,1),(5,),(5,),(3,4))[leg_index],dtype=int)
+        neighbor_end_distances = neighbor_ankle_distances = None
+        terms.update(neighbor_end=np.zeros(len(R_points)),neighbor_ankle=np.zeros(len(R_points)))
+        if self.landing_cost_weights['neighbor_end'] or self.landing_cost_weights['neighbor_ankle']:
+            if reference_R_points is None:
+                reference_R_points = self.kin._B2R(self.B_e_cur,np.arange(6)).T
+            reference = np.asarray(reference_R_points,dtype=float)[neighbors]
+            neighbor_end_distances = np.linalg.norm(R_points[:,None,:]-reference[None,:,:],axis=2)
+            end_scale = h.LEG_LEG_END_HARD_CLEARANCE
+            terms['neighbor_end'] = (np.maximum(5*end_scale-neighbor_end_distances.mean(axis=1),0)/end_scale)**2
+            if self.landing_cost_weights['neighbor_ankle']:
+                neighbor_B = self.kin._R2B(reference.T,neighbors).T
+                neighbor_flat = v.Pos2FlatIndex(neighbor_B)
+                neighbor_ankles = self.kin._B2R(
+                    v.ankle_pos[neighbor_flat,self.q3_branches[neighbors]].T,neighbors).T
+                candidate_ankles = self.kin._B2R(v.ankle_pos[flat,self.q3_branches[leg_index]].T,leg_index).T
+                neighbor_ankle_distances = np.linalg.norm(candidate_ankles[:,None,:]-neighbor_ankles[None,:,:],axis=2)
+                ankle_scale = v.ankle_collide_radi
+                terms['neighbor_ankle'] = (np.maximum(5*ankle_scale-neighbor_ankle_distances.mean(axis=1),0)/ankle_scale)**2
+        costs = np.zeros(len(R_points))
+        for name,weight in self.landing_cost_weights.items():
+            if weight:
+                costs += weight*terms[name]
+        costs[~np.isfinite(xb3).all(axis=1) | ~np.isfinite(costs)] = np.inf
+        if not np.isfinite(costs).any():
+            raise ValueError("No finite landing cost for leg {}".format(leg_index))
+        self._last_landing_cost = dict(leg_index=int(leg_index),terms=terms,costs=costs.copy(),
+            neighbor_indices=neighbors.copy(),neighbor_end_distances=neighbor_end_distances,
+            neighbor_ankle_distances=neighbor_ankle_distances)
+        return int(np.argmin(costs))
+
+    def SetInitBySE3(self,attached:np.ndarray|None=None,*,ik_branch=None,initial_pose:SE3|None=None,
+                     initial_waypoint_index=None):
         """清空运行状态，并按环境、初始机身位姿和指定分支选择支撑落脚点。
 
-        initial_pose 默认为参考路径首个位姿。未传入实际 attached 反馈时，
+        initial_pose 与 initial_waypoint_index 二选一；索引从零开始，选原始路标点。
+        两者都未提供时使用参考路径首点。未传入实际 attached 反馈时，
         前馈保持为零，直到 RequestSingleStep 收到传感器反馈。
         """
         if not self.path_se3:
             raise RuntimeError("Use LoadSE3 before SetInitBySE3")
-        pose = self.path_se3[0] if initial_pose is None else initial_pose
-        if not isinstance(pose,SE3) or not np.isfinite(pose.A).all():
-            raise ValueError("initial_pose must be a finite SE3 pose")
+        pose = self._ResolveInitialPose(initial_pose,initial_waypoint_index)
         branches = self.q3_branches.copy() if ik_branch is None else np.asarray(ik_branch)
         if branches.shape != (6,) or not np.isin(branches,[0,1]).all():
             raise ValueError("ik_branch must contain six values in {0, 1}")
+        previous_B_points = self.B_e_cur.copy() if self.set_init else None
         self.set_init = False
         self.q_des.fill(0.0)
         #设置腿部步态初始值
@@ -201,6 +311,16 @@ class ExpertComplex:
         #swing 腿部会保持这个位置，stance会根据se3计算期望的落脚点
         # 非支撑腿使用两种 IK 分支均可达的收腿参考位，不将其作为落脚点。
         B_init_points = np.tile(np.array([[self.kin.l1+self.kin.l2],[0.0],[0.0]]),(1,6))
+        # 固定本轮邻腿参考，避免按腿选点时相互覆盖；首次初始化使用收腿参考位。
+        reference_B_points = B_init_points.copy()
+        if previous_B_points is not None:
+            v = self.hex_state.robot_voxels.leg_voxels
+            flat = v.Pos2FlatIndex(np.nan_to_num(previous_B_points.T))
+            valid_reference = (np.isfinite(previous_B_points).all(axis=0)
+                & v.IsInsideRange(previous_B_points.T)
+                & np.isfinite(v.ankle_pos[flat,self.q3_branches]).all(axis=1))
+            reference_B_points[:,valid_reference] = previous_B_points[:,valid_reference]
+        reference_R_points = self.kin._B2R(reference_B_points,np.arange(6)).T
         for leg_index in np.flatnonzero(self.gaits):
             candidates = landing_idx[leg_feasi[leg_index,:,self.q3_branches[leg_index]]]
             if candidates.size == 0:
@@ -208,11 +328,16 @@ class ExpertComplex:
                     f"No feasible initial landing point for {self.leg_names[leg_index]} "
                     f"in IK branch {self.q3_branches[leg_index]}"
                 )
-            B_points = self.kin._R2B(pose.inv()*point_map.landing_points[candidates].T,leg_index).T
-            flat_indices = self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
-            best = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[flat_indices,leg_index])
+            R_points = (pose.inv()*point_map.landing_points[candidates].T).T
+            B_points = self.kin._R2B(R_points.T,leg_index).T
+            # flat_indices = self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
+            # best = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[flat_indices,leg_index])
+            R_normals = (pose.R.T@point_map.normals[candidates].T).T
+            # best = self._SelectLandingPointByPlaneAngle(R_points,R_normals,leg_index)
+            reference_R = self.kin._B2R(B_init_points[:,leg_index,None],leg_index).ravel()
+            best = self._SelectLandingPoint(R_points,R_normals,leg_index,reference_R,reference_R_points)
             normal = self.kin.RVectorToLeg(
-                (pose.R.T@point_map.normals[candidates[best]])[:,None],leg_index
+                R_normals[best][:,None],leg_index
             ).ravel()
             self.B_landing_n[:,leg_index] = normal
             self.B_support_n[:,leg_index] = normal
@@ -237,6 +362,7 @@ class ExpertComplex:
         self.B_e_cur[:] = fk_result["B_foot"].T
         if attached is not None:
             self._ComputeQuasiStaticTauFF(pose,self.q_des[:,:3],fk_result["R_com"],attached)
+        self.initial_pose = pose.copy()
         self.set_init = True
         return self.q_des.copy(),self.tau_ff.copy(),self.adhesions.copy()
 
@@ -260,7 +386,9 @@ class ExpertComplex:
         self.GaitPlanning(cur_se3,q_motor,q_torque,attached) #更新步态，更新B_e_des_traj
         self.GetJointAngles(q_motor)# 根据当前角度和期望执行的B_e_des计算目标角度
         self._ComputeQuasiStaticTauFF(cur_se3,q_motor,fk_result["R_com"],attached)
-        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
+        # return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
+        #return 的最后一位标识哪些需要舵机势能，也就是siwng腿，测试使用所有的舵机都上势能
+        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), np.ones((6,),dtype=np.bool_)
 
     @staticmethod
     def _Skew(vector:np.ndarray)->np.ndarray:
@@ -383,6 +511,7 @@ class ExpertComplex:
             self.B_e_traj=[self.B_e_cur[:,i,None].copy() for i in range(6)]
             #均为空说明刚初始化，直接计算对应的stance和swing轨迹
             #计算SE3轨迹插值，同时计算可行支撑轨迹与可行长度，返回执行完支撑轨迹时的机器人理想位姿
+            print("Len(self.B_e_traj) == 0, SE3Interp_and_StanceCal")
             self._SE3Interp_and_StanceCal(cur_se3)
             #假设摆动轨迹2s内完成 支撑轨迹耗时大于等于2s 就采用2s位置的se3 否则采用最后的se3
             print("len(self.interp_path_se3)=",len(self.interp_path_se3))
@@ -392,6 +521,8 @@ class ExpertComplex:
         #判断swing当前轨迹索引，并进行接触检测
         # 只有摆动腿能触发新落地事件，已吸附的支撑腿必须保留正在执行的轨迹。
         swing_dones = (~self.gaits) & (self._ContactDetection(q_cur,q_torque) | confirmed_attached)
+        self.B_support_n[:,swing_dones] = self.B_landing_n[:,swing_dones]
+
         #判断当前已经执行的轨迹长度
         execute_done_mask = self.q_traj_index == self.B_e_traj_len -1 
         swing_continue = ~swing_dones & ~self.gaits & ~execute_done_mask
@@ -434,6 +565,7 @@ class ExpertComplex:
                         self.gaits.fill(0)
                         self.gaits[self.groups[self.stance_group_index]]=1
                         #计算步态切换之后的swing和stance轨迹，此时需要重新计算距离path最近的点，然后计算插值轨迹
+                        print("Giat switch, SE3Interp_and_StanceCal")
                         self._SE3Interp_and_StanceCal(cur_se3)
                         print("len(self.interp_path_se3)=",len(self.interp_path_se3))
                         # target_se3 = self.interp_path_se3[-1] if len(self.interp_path_se3)*self.dt<3.0 else self.interp_path_se3[int(3.0/self.dt)]
@@ -484,7 +616,7 @@ class ExpertComplex:
         #使用迟滞的奇异点判断，
         self._Singularity_Hysteresis(B_e_des,q_cur)        
         damp_inv_jac = self.kin.DampInvJac(q_cur,self.singularity_legs)
-        delt_q = 65*(damp_inv_jac @ ((B_e_des-self.B_e_cur.T)[...,None])).squeeze(-1)
+        delt_q = 45*(damp_inv_jac @ ((B_e_des-self.B_e_cur.T)[...,None])).squeeze(-1)
         self.q_des[:,0:3] = q_cur + delt_q*self.dt
         self.q_des[self.singularity_legs,0] = self.hold_q[self.singularity_legs]
 
@@ -765,15 +897,18 @@ class ExpertComplex:
         # 当z为正的时候，代表电磁铁悬空，需要腿部把电磁铁拉着向上
         # (6,3) * (6,3) -> 6
         contact_force = np.sum(self.kin.CF_Estimate(q_torque,q_cur,self.singularity_legs) * self.B_landing_n.T,axis=1)
-        self.contact_count[(contact_force <=-7)&(~self.gaits)&(self.q_traj_index>self.B_e_traj_len/3.0)] += 1
-
+        self.contact_count[(contact_force <=-20)&(~self.gaits)&(self.q_traj_index>self.B_e_traj_len/2.0)] += 1
+        # if self.gaits[5] == 0:
+        #     print("rm contact force=",contact_force[5],flush=True)
+        # else:
+        #     print("rm stance",flush=True)
         # print(f"contac_force={np.round(contact_force,2)} count={self.contact_count} gaits={self.gaits}")
         #接触力  & 执行超过一半轨迹（避免stance刚切换为swing时就判定接触导致摆动结束）
         # print(f" contact_force={contact_force} gaits={self.gaits}")
         # contact_mask =  (self.contact_count>=10) & (~self.gaits) & (self.q_traj_index>self.B_e_traj_len/4.0)
-        contact_mask = self.contact_count>=10
+        contact_mask = self.contact_count>=80
         self.contact_count[contact_mask] = 0
-        self.B_support_n[:,contact_mask] = self.B_landing_n[:,contact_mask]
+        # self.B_support_n[:,contact_mask] = self.B_landing_n[:,contact_mask]
         return contact_mask
     
     #循环一步一步计算支撑轨迹的算法
@@ -925,11 +1060,17 @@ class ExpertComplex:
         输入target_se3，按照足端空间中的分段B样条逻辑计算摆动腿轨迹。 cur_se3是为了计算start_point的抬脚点位姿
         目前设定2s内完成摆动轨迹
         """
+        self._last_swing_planning_failures = {}
         if len(self.B_e_traj) != 6:
             self.B_e_traj = [self.B_e_cur[:,i,None].copy() for i in range(6)]
         self._ClearTraj(~self.gaits)
         swing_index = (~self.gaits).nonzero()[0]
         stance_index = self.gaits.nonzero()[0]
+        reference_R_points = ((target_se3.inv()*cur_se3)*
+            self.kin._B2R(self.B_e_cur,np.arange(6))).T
+        for leg_index in stance_index:
+            reference_R_points[leg_index] = self.kin._B2R(
+                self.B_e_traj[leg_index][:,-1,None],leg_index).ravel()
 
         def _Bezier4(c0,c1,c2,c3)->BSpline:
             knot = np.array([0,0,0,0,1,1,1,1],dtype=np.float32)
@@ -951,7 +1092,7 @@ class ExpertComplex:
             length = 0.0
             for i in range(len(points)-1):
                 length += np.linalg.norm(points[i+1]-points[i])
-            return max(length/(self.v_max*2.0),self.dt)
+            return max(length/(self.v_max*0.4),self.dt)
 
         def _SampleSplines(splines:List[BSpline],Times:np.ndarray,dt:float,segment_branches:np.ndarray,cal_acc=True,return_meta=False):
             B_points = []
@@ -993,8 +1134,8 @@ class ExpertComplex:
             start_q3_branch = int(self.q3_branches[leg_index])
             start_normal = self.B_support_n[:,leg_index]
             landing_normal = self.B_landing_n[:,leg_index]
-            raise_point,raise_dist_init = self.hex_state.FarestPoints(start_point,start_normal,cur_se3,leg_index,distance=0.08)
-            down_point, down_dist_init = self.hex_state.FarestPoints(landing_point,landing_normal,target_se3,leg_index,distance=0.08)
+            raise_point,raise_dist_init = self.hex_state.FarestPoints(start_point,start_normal,cur_se3,leg_index,distance=0.1)
+            down_point, down_dist_init = self.hex_state.FarestPoints(landing_point,landing_normal,target_se3,leg_index,distance=0.1)
             # raise_point = start_point + start_normal*0.06
             # down_point = landing_point + landing_normal*0.06
             # raise_dist_init = 0.06
@@ -1319,56 +1460,82 @@ class ExpertComplex:
                 )
                 candidate_mask[leg_index,leg_mask] &= collision_free[:,branches[leg_index]]
 
-        min_candidates = 3
-        candidate_counts = candidate_mask[swing_index].sum(axis=1)
-        if (candidate_counts < min_candidates).any():
-            details = ", ".join(
-                f"{self.leg_names[leg_index]}(branch={branches[leg_index]}, count={count})"
-                for leg_index,count in zip(swing_index,candidate_counts)
-            )
-            print(">>>>>>> WARNING: fewer than 6 initial landing candidates in current branch; "
-                  f"holding all swing legs at current points: {details}")
-            # _ClearTraj 已将全部摆动腿设置为当前点的单点轨迹。
-            return
-
+        # 每条腿独立前瞻；交集为空时保留该腿上一轮非空候选。
+        lookahead_legs = swing_index[candidate_mask[swing_index].any(axis=1)]
         future_path_se3,_ = self._Start2PathSE3Interp(target_se3)
         for i in range(20,len(future_path_se3),20):
+            if not lookahead_legs.size:
+                break
             _,future_lp_idx,_,future_lp_mask = self.hex_state.RobotFeasiCheck(future_path_se3[i],lp_idx)
-            next_candidate_mask = candidate_mask.copy()
-            for leg_index in swing_index:
+            continuing_legs = []
+            for leg_index in lookahead_legs:
                 # 按世界点索引取交集，不依赖未来查询结果的排列顺序。
                 feasible_indices = future_lp_idx[future_lp_mask[leg_index,:,branches[leg_index]]]
-                next_candidate_mask[leg_index] &= np.isin(lp_idx,feasible_indices)
-            if (next_candidate_mask[swing_index].sum(axis=1) < min_candidates).any():
-                break
-            candidate_mask = next_candidate_mask
+                next_mask = candidate_mask[leg_index] & np.isin(lp_idx,feasible_indices)
+                if next_mask.any():
+                    candidate_mask[leg_index] = next_mask
+                    continuing_legs.append(leg_index)
+            lookahead_legs = np.asarray(continuing_legs,dtype=int)
+
+        def _RecordFailure(leg_index,reason):
+            self._last_swing_planning_failures[self.leg_names[leg_index]] = {
+                "branch": int(branches[leg_index]),
+                "candidate_count": int(candidate_mask[leg_index].sum()),
+                "reason": reason,
+            }
+            print(f"Swing planning failed for {self.leg_names[leg_index]}: {reason}; "
+                  "holding this leg and continuing other swing legs",flush=True)
 
         for leg_index in swing_index:
             chosen_lp_idx = lp_idx[candidate_mask[leg_index]]
-            landing_q3_branch = int(branches[leg_index])
-            #3,N
-            R_points = target_se3.inv() * self.hex_state.env_pointsmap_voxels.landing_points[chosen_lp_idx].T
-            #N,3
-            B_points = self.kin._R2B(R_points,leg_index).T
-            
-            flat_index = self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
-            landing_idx = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[flat_index,leg_index])
-            # landing_idx = np.argmax(np.linalg.norm(B_points-self.B_e_cur[:,leg_index],axis=0))
-
-            R_normal = target_se3.R.T @ self.hex_state.env_pointsmap_voxels.normals[chosen_lp_idx[landing_idx]].T
-            landing_normal = R_normal.copy()
-            if leg_index < 3:
-                landing_normal[:2] *= -1
-            self.B_landing_n[:,leg_index] = landing_normal
-            #放入世界系下的目标落脚点
-            self.W_landing_points[:,leg_index] = (target_se3 * R_points[:,landing_idx]).squeeze(1)
-            _PlanOneLeg(
-                leg_index,
-                self.B_e_cur[:,leg_index],
-                B_points[landing_idx],
-                landing_q3_branch,
-            )
+            if not chosen_lp_idx.size:
+                _RecordFailure(leg_index,"no feasible landing candidates")
+                continue
+            previous = {name: getattr(self,name)[:,leg_index].copy() for name in (
+                "landing_point","B_landing_n","W_landing_points")}
+            try:
+                landing_q3_branch = int(branches[leg_index])
+                #3,N
+                R_points = target_se3.inv() * self.hex_state.env_pointsmap_voxels.landing_points[chosen_lp_idx].T
+                #N,3
+                B_points = self.kin._R2B(R_points,leg_index).T
+                
+                # flat_index = self.hex_state.robot_voxels.leg_voxels.Pos2FlatIndex(B_points)
+                # landing_idx = np.argmax(self.hex_state.robot_voxels.to_bound_dist_flat[flat_index,leg_index])
+                # landing_idx = np.argmax(np.linalg.norm(B_points-self.B_e_cur[:,leg_index],axis=0))
+                R_normals = (target_se3.R.T @ self.hex_state.env_pointsmap_voxels.normals[chosen_lp_idx].T).T
+                # landing_idx = self._SelectLandingPointByPlaneAngle(R_points.T,R_normals,leg_index)
+                current_R_point = ((target_se3.inv()*cur_se3)*
+                                   self.kin._B2R(self.B_e_cur[:,leg_index,None],leg_index)).ravel()
+                landing_idx = self._SelectLandingPoint(
+                    R_points.T,R_normals,leg_index,current_R_point,reference_R_points)
     
+                R_normal = R_normals[landing_idx]
+                landing_normal = R_normal.copy()
+                if leg_index < 3:
+                    landing_normal[:2] *= -1
+                self.B_landing_n[:,leg_index] = landing_normal
+                #放入世界系下的目标落脚点
+                self.W_landing_points[:,leg_index] = (target_se3 * R_points[:,landing_idx]).squeeze(1)
+                _PlanOneLeg(
+                    leg_index,
+                    self.B_e_cur[:,leg_index],
+                    B_points[landing_idx],
+                    landing_q3_branch,
+                )
+                if (not np.isfinite(self.B_e_traj[leg_index]).all()
+                        or self.q_traj[leg_index] is None
+                        or not np.isfinite(self.q_traj[leg_index]).all()):
+                    raise FloatingPointError("nonfinite or missing swing trajectory")
+            except (ValueError,FloatingPointError,np.linalg.LinAlgError) as error:
+                failed_mask = np.zeros(6,dtype=bool)
+                failed_mask[leg_index] = True
+                self._ClearTraj(failed_mask)
+                self.q3_branches[leg_index] = branches[leg_index]
+                for name,value in previous.items():
+                    getattr(self,name)[:,leg_index] = value
+                _RecordFailure(leg_index,f"{type(error).__name__}: {error}")
+
     def _Cal_cost(self,B_points:np.ndarray,acc_u_scaled:np.ndarray,u:np.ndarray,leg_index:int,target_se3:SE3,
                   sol_indices,smooth_cost=None)->float:
         """计算代价函数
@@ -1395,19 +1562,20 @@ class ExpertComplex:
         #计算平滑代价函数 加速度沿着u的积分；多段样条时优先使用调用方逐段积分后的值。
         if smooth_cost is None:
             smooth_cost = self.trapezoid(np.sum(acc_u_scaled**2,axis=0),u)
-        R_points = self.kin._B2R(B_points,leg_index)
-        #计算R point在世界系下的位置，需要预估R系与世界系的相对位置关系 在gait planning中，swing和stance是同时出发的
-        B_time_steps = np.clip(np.arange(B_points.shape[1]),a_min=0,a_max=len(self.interp_path_T)-1)
+            
+        # R_points = self.kin._B2R(B_points,leg_index)
+        # #计算R point在世界系下的位置，需要预估R系与世界系的相对位置关系 在gait planning中，swing和stance是同时出发的
+        # B_time_steps = np.clip(np.arange(B_points.shape[1]),a_min=0,a_max=len(self.interp_path_T)-1)
         #M,4,4 4,M -> M,4        
-        W_points = np.einsum("mij,im->mj",
-                             self.interp_path_T[B_time_steps],
-                             np.vstack([R_points,np.ones((R_points.shape[1]))]))[:,:3]
-        # W_points = target_se3*R_points                
+        # W_points = np.einsum("mij,im->mj",
+        #                      self.interp_path_T[B_time_steps],
+        #                      np.vstack([R_points,np.ones((R_points.shape[1]))]))[:,:3]
+              
         #计算身体碰撞与环境碰撞ESDF代价
-        env_esdf = self._QueryESDFTrilinear(W_points,
-                                            self.hex_state.env_pointsmap_voxels.voxels,
-                                            self.hex_state.env_pointsmap_voxels.env_esdf)
-        env_collision_cost = np.square(np.clip(0.06-env_esdf,a_min=0,a_max=None)).sum()
+        # env_esdf = self._QueryESDFTrilinear(W_points,
+        #                                     self.hex_state.env_pointsmap_voxels.voxels,
+        #                                     self.hex_state.env_pointsmap_voxels.env_esdf)
+        # env_collision_cost = np.square(np.clip(0.06-env_esdf,a_min=0,a_max=None)).sum()
 
         #足部末端点与身体碰撞的惩罚等价于worksapce far cost 这里就不重复添加
         # body_esdf = self._QueryESDFTrilinear(R_points.T,
@@ -1444,7 +1612,7 @@ class ExpertComplex:
         #轨迹长度代价 长度代价效果很差导致曲线扭曲 光滑代价能达到同样的效果 这里取消
         # length_cost = np.linalg.norm(np.diff(B_points,axis=1),axis=0).sum()
         # print("smooth_cost={},workspace_far_cost={},env_collision_cost={}".format(smooth_cost,worksapce_far_cost,env_collision_cost))
-        cost = 0.2*smooth_cost + 0.3*worksapce_far_cost  #+ 5.0*env_collision_cost #+ankle_collision_cost
+        cost = 0.3*smooth_cost + 0.2*worksapce_far_cost  #+ 0.2*env_collision_cost #+ankle_collision_cost
         # cost = smooth_cost + 5.0*env_collision_cost #+ankle_collision_cost
 
         return cost                

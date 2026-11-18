@@ -1,7 +1,7 @@
 <launch>
   <arg name="mode" default="climb"/>
   <arg name="runner_config" default="$(find hex_runner)/config/$(arg mode).yaml"/>
-  <arg name="backend_config" default="$(eval find('hex_isaacgym') + '/config/' + ('plane.yaml' if arg('mode') == 'climb' else 'complex_surface4.yaml'))"/>
+  <arg name="backend_config" default="$(eval find('hex_isaacgym') + '/config/' + ('quad_plane.yaml' if arg('mode') == 'quad_climb' else ('plane.yaml' if arg('mode') == 'climb' else 'complex_surface4.yaml')))"/>
   <arg name="to_sim_info" default="$(find hex_runner)/config/to_sim_info.yaml"/>
   <arg name="device" default="cpu"/>
   <arg name="headless" default="false"/>

@@ -12,7 +12,7 @@ from std_srvs.srv import Trigger, TriggerResponse
 from dm_motor_fusion.msg import MultiLegCommand, MultiLegState
 from feetech_servo.msg import servo_cmd, servo_state
 from magnetic.msg import MagneticCmd, MagneticState
-from hex_kinematic.ros_contract import read_motor, read_servo, read_magnetic, write_magnetic, write_motor, write_servo, write_servo_enabled
+from hex_kinematic.ros_contract import read_valid, read_motor, read_servo, read_magnetic, write_magnetic, write_motor, write_servo, write_servo_enabled
 from hex_kinematic.se3_utils import transform_from_xyzw
 from .config import RunnerConfig
 from .core import Runner, FeedbackCache, Phase, finite
@@ -22,12 +22,12 @@ from .adapters import ExpertAdapter
 class RunnerNode:
     def __init__(self, config, output_dir=None, adapter=None):
         self.config = config
-        if config.expert_type == "climb" and not config.velocity_scales:
+        if config.expert_type in ("climb", "quad_climb") and not config.velocity_scales:
             raise ValueError("climb requires velocity_scales in runner configuration")
         self.cache = FeedbackCache()
         self.runner = Runner(config, adapter if adapter is not None else ExpertAdapter(config))
         self.output_dir = Path(output_dir).expanduser() if output_dir else None
-        self.last_slow = {"servo": -float("inf"), "magnetic": -float("inf")}
+        self.last_slow = {"magnetic": -float("inf")}
         self.motor_pub = rospy.Publisher("hex/motor/command", MultiLegCommand, queue_size=1)
         self.servo_pub = rospy.Publisher("hex/servo/command", servo_cmd, queue_size=1)
         self.magnetic_pub = rospy.Publisher("hex/magnetic/command", MagneticCmd, queue_size=1)
@@ -56,18 +56,18 @@ class RunnerNode:
 
     def _motor(self, message):
         def decode(msg):
-            q = finite(read_motor(msg, "pos"), (6, 3))
-            tau = finite(read_motor(msg, "tau"), (6, 3))
-            finite(read_motor(msg, "vel"), (6, 3))
-            return (q, tau), all(msg.valid) and msg.header.stamp.to_nsec() > 0
+            q = finite(read_motor(msg, "pos", self.config.leg_names), (len(self.config.leg_names), 3))
+            tau = finite(read_motor(msg, "tau", self.config.leg_names), (len(self.config.leg_names), 3))
+            finite(read_motor(msg, "vel", self.config.leg_names), (len(self.config.leg_names), 3))
+            return (q, tau), all(read_valid(msg, self.config.leg_names, motor=True)) and msg.header.stamp.to_nsec() > 0
         self._update("motor", decode, message, message.header.stamp.to_nsec())
 
     def _servo(self, message):
-        self._update("servo", lambda msg: (finite(read_servo(msg), (6,)), all(msg.valid)), message)
+        self._update("servo", lambda msg: (finite(read_servo(msg, self.config.leg_names), (len(self.config.leg_names),)), all(read_valid(msg, self.config.leg_names))), message)
 
     def _magnetic(self, message):
-        self._update("magnetic", lambda msg: ((finite(read_magnetic(msg, "attached_"), (6,)),
-                     read_magnetic(msg, "enabled_")), all(read_magnetic(msg, "valid_"))), message)
+        self._update("magnetic", lambda msg: ((finite(read_magnetic(msg, "attached_", self.config.leg_names), (len(self.config.leg_names),)),
+                     read_magnetic(msg, "enabled_", self.config.leg_names)), all(read_magnetic(msg, "valid_", self.config.leg_names))), message)
 
     def _pose(self, message):
         def decode(msg):
@@ -103,7 +103,7 @@ class RunnerNode:
 
     def _velocity(self, message):
         try:
-            if self.config.expert_type != "climb":
+            if self.config.expert_type not in ("climb", "quad_climb"):
                 return
             raw = finite([message.linear.x, message.linear.y, message.angular.z], (3,))
             scales = np.array([self.config.velocity_scales[name] for name in ("vx", "vy", "wz")])
@@ -119,27 +119,27 @@ class RunnerNode:
         off = self.runner.magnetic_forced_off
         output_key = (disabled, off, self.runner.reset_count)
         if getattr(self, "last_output_key", None) != output_key:
-            self.last_slow = {"servo": -float("inf"), "magnetic": -float("inf")}
+            self.last_slow = {"magnetic": -float("inf")}
             self.last_output_key = output_key
-        if command is not None or disabled:
-            motor = MultiLegCommand(option=-1 if disabled else 1)
+        output = self.runner.actuator_output
+        if output is not None:
+            motor = MultiLegCommand(option={"disable": -1, "reset": 2, "compute": 1}[output])
             if not disabled:
-                write_motor(motor, "pos", command.q[:, :3])
-                write_motor(motor, "tau", command.tau)
-                write_motor(motor, "vel", np.zeros((6, 3)))
-                write_motor(motor, "kp", np.full((6, 3), self.config.motor_kp))
-                write_motor(motor, "kd", np.full((6, 3), self.config.motor_kd))
+                write_motor(motor, "pos", command.q[:, :3], self.config.leg_names)
+                write_motor(motor, "tau", command.tau, self.config.leg_names)
+                write_motor(motor, "vel", np.zeros((len(self.config.leg_names), 3)), self.config.leg_names)
+                write_motor(motor, "kp", np.full((len(self.config.leg_names), 3), self.config.motor_kp), self.config.leg_names)
+                write_motor(motor, "kd", np.full((len(self.config.leg_names), 3), self.config.motor_kd), self.config.leg_names)
             self.motor_pub.publish(motor)
-        if (command is not None or disabled) and now - self.last_slow["servo"] >= 1.0 / self.config.servo_hz:
+        if output is not None:
             message = servo_cmd(enable=not disabled)
-            write_servo_enabled(message, np.zeros(6, dtype=bool) if disabled else command.servo_enabled)
+            write_servo_enabled(message, np.zeros(len(self.config.leg_names), dtype=bool) if disabled else command.servo_enabled, self.config.leg_names)
             if not disabled:
-                write_servo(message, command.q[:, 3])
+                write_servo(message, command.q[:, 3], self.config.leg_names)
             self.servo_pub.publish(message)
-            self.last_slow["servo"] = now
         if (command is not None or off) and now - self.last_slow["magnetic"] >= 1.0 / self.config.magnetic_hz:
             message = MagneticCmd()
-            write_magnetic(message, np.zeros(6, dtype=bool) if off else command.adhesions)
+            write_magnetic(message, np.zeros(len(self.config.leg_names), dtype=bool) if off else command.adhesions, leg_names=self.config.leg_names)
             self.magnetic_pub.publish(message)
             self.last_slow["magnetic"] = now
         if now - self.last_diag >= 0.1:
@@ -151,7 +151,7 @@ class RunnerNode:
                           feedback_ready=feedback is not None, feedback_reason=reason, feedback_age=ages,
                           failure_reason=self.runner.failure_reason, reset_count=self.runner.reset_count,
                           compute_count=self.runner.compute_count, command=self.runner.velocity.tolist(),
-                          servo_enabled=[False]*6 if disabled else (None if command is None else command.servo_enabled.tolist()))
+                          servo_enabled=[False]*len(self.config.leg_names) if disabled else (None if command is None else command.servo_enabled.tolist()))
             values.update(self.runner.adapter.diagnostics())
             status.values = [KeyValue(str(key), json.dumps(value)) for key, value in values.items()]
             diagnostic = DiagnosticArray(status=[status])

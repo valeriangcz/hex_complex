@@ -26,15 +26,15 @@ def climb_initial_joints(kin, *, motor_positions=None, foot_positions=None, ik_b
             raise ValueError('ik_branch must match the supplied ankle angle sign')
     else:
         solutions,valid = kin.InverseKin2MultiBatch(np.asarray(foot_positions,dtype=float))
-        for i,leg in enumerate(LEG_NAMES):
+        for i,leg in enumerate(kin.leg_names):
             if not valid[i,branches[i]]:
                 raise ValueError(f'Initial foot position for {leg} is invalid in IK branch {branches[i]}')
-        motors = solutions[np.arange(6),branches]
-    for i, leg in enumerate(LEG_NAMES):
+        motors = solutions[np.arange(kin.num_legs),branches]
+    for i, leg in enumerate(kin.leg_names):
         bounds = np.vstack((kin.joints_limits_thigh[i], kin.joints_limits_rest))
         if ((motors[i] < bounds[:,0] - 1e-6) | (motors[i] > bounds[:,1] + 1e-6)).any():
             raise ValueError('initial_state.'+leg+': motor angles outside kinematic limits')
-    q = np.zeros((6,4))
+    q = np.zeros((kin.num_legs,4))
     q[:, :3] = motors
     q[:, 3] = -motors[:, 1] - motors[:, 2] - np.pi / 2
     return q

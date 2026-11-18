@@ -2,17 +2,16 @@ workspace_root: ../../..
 expert_type: complex
 pose_source: se3
 control_dt: 0.01
-servo_hz: 20.0
-magnetic_hz: 20.0
+magnetic_hz: 50.0
 feedback_timeout: 0.5
-motor_kp: 60.0
-motor_kd: 1.0
+motor_kp: 100.0
+motor_kd: 1.5
 motor_torque_limit: 27.0
 robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 expert_parameters:
   magnetic_attach_above: 0.85  # 六腿统一，高于此比例确认吸附
   magnetic_release_below: 0.05  # 六腿统一，低于此比例确认释放
-  v_max: 0.08
+  v_max: 0.1
   w_max: 0.2
   stance_maxmove_t: 0.2
   stance_maxmove_w: 0.4
@@ -22,18 +21,21 @@ resources:
   point_map_file: ${DATA_ROOT}/maps/complex_surface4/complex_surface4_point_map.npz
   env_cache_file: ${DATA_ROOT}/maps/complex_surface4/env_voxels.npz
   robot_cache_dir: ${DATA_ROOT}/robots/hex_magnetic
-  se3_path: package://hex_se3/data/trajectories/optimized_cma_es_torch_path_20261105_183455_665425.json
+  se3_path: package://hex_se3/data/trajectories/optimized_cma_es_torch_path_20261118_191401_619695.json
 initial_state:
-  pose:
-    position:
-      x: 2.3104510167678747
-      y: 4.4763037345614
-      z: 0.18266166870934133
-    orientation:
-      x: 8.323880732471449e-05
-      y: 0.10452843012500451
-      z: 0.9945215800370322
-      w: 0.0007919643604078812
+  # 原始路标点索引，从 0 开始；与 pose 二选一，由 ExpertComplex 解析。
+  waypoint_index: 0
+  # 手动设置初始位姿时，注释 waypoint_index，并取消下方 pose 的注释。
+  # pose:
+  #   position:
+  #     x: 2.3104510167678747
+  #     y: 4.4763037345614
+  #     z: 0.18266166870934133
+  #   orientation:
+  #     x: 8.323880732471449e-05
+  #     y: 0.10452843012500451
+  #     z: 0.9945215800370322
+  #     w: 0.0007919643604078812
   # 腿索引顺序：0=lb, 1=lf, 2=lm, 3=rb, 4=rf, 5=rm
   groups: [[0, 1, 5], [2, 3, 4]]
   stance_group: 0  # 初始支撑组，索引 groups
@@ -51,7 +53,6 @@ initial_state:
     rf: false
     rm: true
     rb: false
-  motor_mode: 1
   servo_enabled: true
-  # 支撑落脚点由 SetInitBySE3 按 pose、环境和 ik_branch 自动选择。
+  # 支撑落脚点由 SetInitBySE3 按所选初始位姿、环境和 ik_branch 自动选择。
   # 不再配置固定关节角 q 或固定足端坐标 feet。

@@ -100,13 +100,54 @@ q, tau_ff, adhesions = expert.SetInitBySE3(
 ```
 
 `initial_pose` 默认是路径首个位姿，`ik_branch` 默认保留各腿当前分支。
-支撑腿从环境可行候选中选择距工作空间边界最远的点，并按环境法向设置足舵机角度；
+初始化支撑点和运行时摆腿落脚点均通过 `_SelectLandingPoint` 选择加权代价最小的可行候选，
+代价相同时取候选顺序中的第一个；初始支撑腿按环境法向设置足舵机角度。
+五项代价为：x_b3 与负表面法向的夹角除以 90°后平方、法向与连杆平面的夹角除以 20°后平方、
+边界距离低于 5 cm 的不足量除以 3 cm 后平方、承载力低于 100 N 的不足量除以 10 N 后平方、
+移动距离除以 0.1 m 后平方。以上阈值随 HexState 对应参数变化，距离尺度固定为 0.1 m。
+默认权重为 `xb3: 1.0, plane: 2.0, boundary: 1.0, force: 1.0, distance: 0.2,
+neighbor_end: 1.0, neighbor_ankle: 1.0`，
+可通过构造参数或 runner YAML 的 `expert_parameters.landing_cost_weights` 覆盖部分权重。
+权重须非负且至少一项为正。运行时距离从实测足端世界位置转换至目标机身系后计算；
+初始化尚无实测足端，使用各腿收腿参考位置计算距离。最近一次评分各项和总成本保存在
+`_last_landing_cost`，仅供诊断。代价选择仍沿用上游候选筛选。
+新增相邻腿末端间距和 ankle 间距两项代价，分别由 `neighbor_end`、`neighbor_ankle` 加权。
+邻接关系：lb/lf 比较 lm，rb/rf 比较 rm；lm 比较 lb、lf，rm 比较 rb、rf。
+中间腿先取到两侧腿距离的平均值，再计算代价；末端和 ankle 分开处理。
+末端间距低于 10 cm 的不足量除以 5 cm 后平方，ankle 间距低于 15 cm 的不足量除以
+5 cm 后平方；尺度分别随末端硬间距、ankle 碰撞半径变化。超过对应间距后不再惩罚。
+运行时相邻支撑腿取轨迹终点，其他腿取当前末端转换至目标机身系的位置；
+ankle 根据对应末端和 IK 分支查缓存后转换至同一机身系。每轮参考位置固定，不随选点顺序改变。
+初始化优先使用清空前的有效当前位置，首次初始化使用收腿参考位。
+两个新权重均设为 0 时关闭新代价。诊断字段还包括 `neighbor_indices` 及候选与各邻腿的
+`neighbor_end_distances`、`neighbor_ankle_distances`（未启用的距离计算可能为 None）。
+摆腿按腿独立筛选和规划：至少一个候选即可尝试，未来交集为空时保留该腿上一轮非空候选，
+其他腿继续前瞻。无候选或单腿数值计算失败时，只将该腿保留在当前足端的单点轨迹，
+并继续计算其余腿；已完成的轨迹保留。失败腿及原因记录在
+`_last_swing_planning_failures`，每轮摆腿规划重新清空。该行为不改变步态切换条件。
 无当前分支可行点时直接报错，不切换分支。非支撑腿处于收腿参考位，foot 角为零。
 支撑法向同步到 `B_support_n` 和 `B_landing_n`。未传实际 `attached` 反馈时，
 初始化前馈为零，由后续 `RequestSingleStep` 计算。
 
 complex YAML 的 `initial_state` 仅保留机身 `pose`、`groups`、`stance_group`、
-`ik_branch`、`magnetic`、`motor_mode` 和 `servo_enabled`，不再支持 `mode/q/feet/frame`。
+`ik_branch`、`magnetic` 和 `servo_enabled`，不再支持 `mode/q/feet/frame`。
 runner 从 Expert 取得计算结果并生成 `hex_runner/config/to_sim_info.yaml`，Expert 本身不写文件。
 仿真只读取该文件获得初态和参考路径，不加载规划地图或调用专家。
 `sim.launch data_root:=...` 只交给 runner 创建 Expert 时使用，reset 不重新加载缓存。
+
+## 四足 ExpertQuadClimb
+
+`from hex_expert import ExpertQuadClimb`。构造时传四足 URDF 和必填
+`sequence=[0,3,1,2]`；不再接受 `groups`、`stance_group`。
+sequence 必须包含四个不重复整数索引 0..3，数组顺序为 `lf/lb/rf/rb`。
+关节、扭矩和磁吸输入分别为 `(4,4)`、`(4,3)`、`(4,)`，
+返回目标、前馈、吸附开关和舵机使能。
+
+初始化四脚支撑并开启磁吸，从 sequence 首项开始，逐腿执行
+等待吸附→等待释放→抬起回位→下降→触地支撑。
+触地使用连续压力及法向速度确认，磁吸反馈不能代替触地；
+触地后四脚共同移动，全部确认吸附后才释放下一腿。
+高点以实测三维距离不超过 5 mm 确认，下降时开启磁吸，摆动腿平面运动使用与支撑腿相反的速度指令。
+`_ComputeFootTargets` 中的 `swing_scale=2.0` 控制摆动倍率，同时作用于抬腿回位、下降及摆动腿平面运动；支撑腿速度不变，抬腿与下降速度上限保留 1.2 m/s。
+Reset/SetInit 恢复四脚支撑和首腿顺序，零速度保持当前阶段。
+完整 ROS 与仿真入口见 hex_runner 的 `quad_climb` 模式。

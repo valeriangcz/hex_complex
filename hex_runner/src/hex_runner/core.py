@@ -41,15 +41,18 @@ class Command:
     servo_enabled: np.ndarray
 
     def __post_init__(self):
-        self.q = finite(self.q, (6, 4))
-        self.tau = finite(self.tau, (6, 3))
+        n = np.asarray(self.q).shape[0]
+        if n not in (4, 6):
+            raise ValueError("commands require four or six legs")
+        self.q = finite(self.q, (n, 4))
+        self.tau = finite(self.tau, (n, 3))
         self.adhesions = np.asarray(self.adhesions, dtype=bool).copy()
         enabled = np.asarray(self.servo_enabled)
-        if enabled.shape != (6,) or enabled.dtype != np.bool_:
-            raise ValueError("servo_enabled must be a boolean array with shape (6,)")
+        if enabled.shape != (n,) or enabled.dtype != np.bool_:
+            raise ValueError("servo_enabled must be a boolean array with shape (n,)")
         self.servo_enabled = enabled.copy()
-        if self.adhesions.shape != (6,):
-            raise ValueError("adhesions must have shape (6,)")
+        if self.adhesions.shape != (n,):
+            raise ValueError("adhesions must have shape (n,)")
 
 
 class FeedbackCache:
@@ -98,6 +101,7 @@ class Runner:
         self.last_motor_sample = None
         self.compute_count = 0
         self.reset_count = 0
+        self.actuator_output = None  # This tick only: reset, compute, or disable.
         self.events = []
         self.lock = RLock()
 
@@ -127,7 +131,7 @@ class Runner:
     def set_velocity(self, velocity):
         velocity = finite(velocity, (3,))
         with self.lock:
-            if self.config.expert_type != "climb":
+            if self.config.expert_type not in ("climb", "quad_climb"):
                 return False
             if self.motor_servo_disabled or self.magnetic_forced_off:
                 return False
@@ -143,9 +147,12 @@ class Runner:
 
     def tick(self, feedback, unavailable=""):
         with self.lock:
+            self.actuator_output = None
             try:
                 # Disable/release requests merge independently and preempt normal operations.
                 if self.pending_disables:
+                    if "disable_actuators" in self.pending_disables:
+                        self.actuator_output = "disable"
                     self.motor_servo_disabled |= "disable_actuators" in self.pending_disables
                     self.magnetic_forced_off |= "release_magnets" in self.pending_disables
                     self.pending_disables.clear()
@@ -168,6 +175,7 @@ class Runner:
                     self.last_motor_sample = feedback.motor_sample
                     self.reset_count += 1
                     self._phase(Phase.READY)
+                    self.actuator_output = "reset"
                     return self.command
                 if self.command is None:
                     return None
@@ -182,7 +190,7 @@ class Runner:
                     self._phase(Phase.RUNNING)
                 if self.phase in (Phase.FAULT, Phase.COMPLETED, Phase.PAUSED):
                     return self.command
-                if self.config.expert_type == "climb":
+                if self.config.expert_type in ("climb", "quad_climb"):
                     self._phase(Phase.RUNNING if np.any(self.velocity) else Phase.READY)
                 if self.phase != Phase.RUNNING or feedback.motor_sample == self.last_motor_sample:
                     return self.command
@@ -193,11 +201,12 @@ class Runner:
                 reason = self.adapter.failure_reason(feedback)
                 if reason:
                     raise ValueError(reason)
+                complete = self.adapter.is_complete(feedback)
+                self.command = candidate
                 self.compute_count += 1
-                if self.adapter.is_complete(feedback):
+                self.actuator_output = "compute"
+                if complete:
                     self._phase(Phase.COMPLETED)
-                else:
-                    self.command = candidate
             except Exception as exc:
                 self.failure_reason = str(exc)
                 self._phase(Phase.FAULT, self.failure_reason)

@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 
-from hex_kinematic import LEG_NAMES
+from hex_kinematic import LEG_NAMES, QUAD_LEG_NAMES
 from hex_kinematic.conventions import MOTOR_JOINT_NAMES
 from hex_kinematic.se3_utils import transform_from_xyzw
 
@@ -29,43 +29,68 @@ class InitialParameters:
     W_T_R: np.ndarray
     magnetic: np.ndarray
     ik_branch: np.ndarray
-    groups: list
-    stance_group: int
-    motor_mode: int
     servo_enabled: bool
+    groups: object = None
+    stance_group: object = None
+    sequence: object = None
     motor_positions: object = None
     foot_positions: object = None
+    waypoint_index: object = None
 
 
 def initial_parameters(values, expert_type):
+    leg_names = QUAD_LEG_NAMES if expert_type == "quad_climb" else LEG_NAMES
     data = dict(values)
-    pose = dict(data.pop('pose'))
-    position = named(pose.pop('position'),('x','y','z'),'initial_state.pose.position')
-    quaternion = named(pose.pop('orientation'),('x','y','z','w'),'initial_state.pose.orientation')
-    if pose or not np.isfinite(position+quaternion).all() or not np.isclose(np.linalg.norm(quaternion),1.,atol=1e-6):
-        raise ValueError('initial_state.pose must contain a finite position and unit quaternion')
-    branches = named(data.pop('ik_branch'),LEG_NAMES,'initial_state.ik_branch')
+    if ('pose' in data) == ('waypoint_index' in data):
+        raise ValueError('initial_state must provide exactly one of pose or waypoint_index')
+    waypoint_index = None
+    W_T_R = None
+    if 'waypoint_index' in data:
+        waypoint_index = data.pop('waypoint_index')
+        if expert_type != 'complex':
+            raise ValueError('initial_state.waypoint_index is only supported for complex')
+        if type(waypoint_index) is not int or waypoint_index < 0:
+            raise ValueError('initial_state.waypoint_index must be a nonnegative integer')
+    else:
+        pose = dict(data.pop('pose'))
+        position = named(pose.pop('position'),('x','y','z'),'initial_state.pose.position')
+        quaternion = named(pose.pop('orientation'),('x','y','z','w'),'initial_state.pose.orientation')
+        if pose or not np.isfinite(position+quaternion).all() or not np.isclose(np.linalg.norm(quaternion),1.,atol=1e-6):
+            raise ValueError('initial_state.pose must contain a finite position and unit quaternion')
+        W_T_R = transform_from_xyzw(position,quaternion)
+    branches = named(data.pop('ik_branch'),leg_names,'initial_state.ik_branch')
     if any(type(value) is not int or value not in (0,1) for value in branches):
         raise ValueError('ik_branch must contain 0 or 1 for every leg')
-    magnets = named(data.pop('magnetic'),LEG_NAMES,'initial_state.magnetic')
+    magnets = named(data.pop('magnetic'),leg_names,'initial_state.magnetic')
     if not all(type(value) is bool for value in magnets):
         raise ValueError('initial_state.magnetic values must be booleans')
-    initial = InitialParameters(transform_from_xyzw(position,quaternion),np.asarray(magnets),
-        np.asarray(branches),data.pop('groups'),data.pop('stance_group'),
-        data.pop('motor_mode'),data.pop('servo_enabled'))
-    if type(initial.motor_mode) is not int or initial.motor_mode != 1 or initial.servo_enabled is not True:
-        raise ValueError('initial_state must explicitly enable MIT motors and servos')
-    if expert_type == 'climb':
+    if expert_type == 'quad_climb':
+        if 'groups' in data or 'stance_group' in data:
+            raise ValueError('quad_climb uses initial_state.sequence; remove groups and stance_group')
+        sequence = data.pop('sequence')
+        if (not isinstance(sequence, list) or len(sequence) != 4
+                or any(type(i) is not int for i in sequence) or set(sequence) != set(range(4))):
+            raise ValueError('initial_state.sequence must contain integer indices 0..3 exactly once')
+        gait = dict(sequence=sequence)
+        if not all(magnets):
+            raise ValueError('quad_climb initial magnetic must enable all four feet')
+    else:
+        gait = dict(groups=data.pop('groups'), stance_group=data.pop('stance_group'))
+    initial = InitialParameters(W_T_R,np.asarray(magnets),np.asarray(branches),
+        data.pop('servo_enabled'),waypoint_index=waypoint_index,**gait)
+    if initial.servo_enabled is not True:
+        raise ValueError('initial_state must explicitly enable servos')
+    if expert_type in ('climb', 'quad_climb'):
         mode = data.pop('mode')
         if mode == 'joints':
-            entries = named(data.pop('q'),LEG_NAMES,'initial_state.q')
+            entries = named(data.pop('q'),leg_names,'initial_state.q')
             initial.motor_positions = np.asarray([named(entry,MOTOR_JOINT_NAMES,'initial_state.q') for entry in entries],dtype=float)
             if not np.isfinite(initial.motor_positions).all():
                 raise ValueError('initial motor angles must be finite radians')
         elif mode == 'feet':
             if data.pop('frame') != 'leg':
                 raise ValueError('initial_state.frame must be leg')
-            entries = named(data.pop('feet'),LEG_NAMES,'initial_state.feet')
+            entries = named(data.pop('feet'),leg_names,'initial_state.feet')
             initial.foot_positions = np.asarray([named(entry,('x','y','z'),'initial_state.feet') for entry in entries],dtype=float)
             if not np.isfinite(initial.foot_positions).all():
                 raise ValueError('initial foot positions must be finite meters')
@@ -81,7 +106,6 @@ class RunnerConfig:
     expert_type: str = "climb"
     pose_source: str = "gravity"
     control_dt: float = 0.01
-    servo_hz: float = 20.0
     magnetic_hz: float = 20.0
     feedback_timeout: float = 0.5
     velocity_scales: dict = field(default_factory=dict)
@@ -98,14 +122,18 @@ class RunnerConfig:
     to_sim_info: Path = None
     data_root: Path = None
 
+    @property
+    def leg_names(self):
+        return QUAD_LEG_NAMES if self.expert_type == "quad_climb" else LEG_NAMES
+
     def __post_init__(self):
-        if self.expert_type not in ("climb", "complex") or self.pose_source not in ("gravity", "se3"):
-            raise ValueError("expert_type must be climb/complex and pose_source gravity/se3")
+        if self.expert_type not in ("climb", "quad_climb", "complex") or self.pose_source not in ("gravity", "se3"):
+            raise ValueError("expert_type must be climb/quad_climb/complex and pose_source gravity/se3")
         if self.expert_type == "complex" and self.pose_source != "se3":
             raise ValueError("complex requires full SE3 localization")
-        if self.expert_type == "climb" and self.pose_source != "gravity":
+        if self.expert_type in ("climb", "quad_climb") and self.pose_source != "gravity":
             raise ValueError("climb requires body gravity direction")
-        for name in ("control_dt", "servo_hz", "magnetic_hz", "feedback_timeout",
+        for name in ("control_dt", "magnetic_hz", "feedback_timeout",
                      "motor_torque_limit", "completion_translation", "completion_rotation", "failure_path_distance"):
             if not np.isfinite(getattr(self, name)) or getattr(self, name) <= 0:
                 raise ValueError(name + " must be positive and finite")
@@ -131,6 +159,6 @@ class RunnerConfig:
             "package://hex_runner/config/to_sim_info.yaml",filename.parent)
         data["initial_state"] = initial_parameters(data["initial_state"],data["expert_type"])
         config = cls(**data)
-        if config.expert_type == "climb" and not config.velocity_scales:
+        if config.expert_type in ("climb", "quad_climb") and not config.velocity_scales:
             raise ValueError("climb configuration requires velocity_scales.vx/vy/wz")
         return config

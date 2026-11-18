@@ -56,9 +56,15 @@ def fake_devices(mode, to_sim_info):
 
     rospy.init_node("test_devices")
     workspace = Path(__file__).resolve().parents[3]
+    from functools import partial
+    from hex_kinematic import LEG_NAMES, QUAD_LEG_NAMES
+    from hex_kinematic.ros_contract import write_valid
+    legs = QUAD_LEG_NAMES if mode == 'quad_climb' else LEG_NAMES
+    n = len(legs)
+    read_motor, read_servo, read_servo_enabled, write_motor, write_servo, read_magnetic, write_magnetic = [partial(f, leg_names=legs) for f in (read_motor, read_servo, read_servo_enabled, write_motor, write_servo, read_magnetic, write_magnetic)]
     initial=snapshot(to_sim_info)
     q, pose=initial.q.copy(), initial.W_T_R.copy()
-    state = dict(q=q, tau=np.zeros((6,3)), enabled=initial.magnetic.copy(), attached=initial.magnetic.astype(float),
+    state = dict(q=q, tau=np.zeros((n,3)), enabled=initial.magnetic.copy(), attached=initial.magnetic.astype(float),
                  invalid=False, change_at=0, ramp_start=initial.magnetic.astype(float))
     def motor(message):
         if message.option == 1:
@@ -88,15 +94,17 @@ def fake_devices(mode, to_sim_info):
         state['attached'] = state['ramp_start'] + fraction * (state['enabled'] - state['ramp_start'])
         stamp = rospy.Time.now()
         motor_msg = MultiLegState(option=1,valid=[True]*18)
+        write_valid(motor_msg, legs, motor=True)
         motor_msg.header.stamp = stamp
-        for suffix, values in [('pos',state['q'][:,:3]),('tau',state['tau']),('vel',np.zeros((6,3)))]:
+        for suffix, values in [('pos',state['q'][:,:3]),('tau',state['tau']),('vel',np.zeros((n,3)))]:
             write_motor(motor_msg,suffix,values)
         servo_msg = servo_state(valid=[True]*6); servo_msg.header.stamp = stamp
+        write_valid(servo_msg, legs)
         write_servo(servo_msg,state['q'][:,3])
         magnetic = MagState()
         write_magnetic(magnetic, state['enabled'], 'enabled_')
         write_magnetic(magnetic, state['attached'], 'attached_')
-        write_magnetic(magnetic, [not state['invalid']]*6, 'valid_')
+        write_magnetic(magnetic, [not state['invalid']]*n, 'valid_')
         magnetic.header.stamp = stamp
         p,quat = transform_to_xyzw(pose)
         pose_msg = PoseStamped(); pose_msg.header.stamp=stamp; pose_msg.header.frame_id='world'
@@ -110,7 +118,7 @@ def fake_devices(mode, to_sim_info):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend',choices=['fake','isaac'],default='fake')
-    parser.add_argument('--mode',choices=['climb','complex'],default='climb')
+    parser.add_argument('--mode',choices=['climb','quad_climb','complex'],default='climb')
     parser.add_argument('--joystick',action='store_true',help='Use Joy buttons 1/0/4 for complex reset/start/pause')
     parser.add_argument('--pose-source',choices=['gravity','se3'])
     parser.add_argument('--device',default='cpu')
@@ -121,6 +129,7 @@ def main():
     parser.add_argument('--to-sim-info',type=Path,help=argparse.SUPPRESS)
     parser.add_argument('--fake-device',action='store_true',help=argparse.SUPPRESS)
     args=parser.parse_args()
+    n = 4 if args.mode == "quad_climb" else 6
     if args.joystick and args.mode != 'complex':
         parser.error('--joystick requires --mode complex')
     if args.fake_device:
@@ -160,6 +169,10 @@ def main():
                 from hex_kinematic.ros_contract import read_motor, read_servo, read_servo_enabled, read_magnetic
                 from hex_kinematic.se3_utils import transform_from_xyzw
                 from magnetic.msg import MagneticCmd
+                from functools import partial
+                from hex_kinematic import LEG_NAMES, QUAD_LEG_NAMES
+                legs = QUAD_LEG_NAMES if args.mode == 'quad_climb' else LEG_NAMES
+                read_motor, read_servo, read_servo_enabled, read_magnetic = [partial(f, leg_names=legs) for f in (read_motor, read_servo, read_servo_enabled, read_magnetic)]
                 rospy.init_node('hex_integration_test',disable_signals=True)
                 observed_pose={}
                 reset_stamps=[]
@@ -199,7 +212,7 @@ def main():
                                           '--mode',args.mode,'--to-sim-info',str(sim_info)])
                 else:
                     device_process=start(['roslaunch','hex_isaacgym','backend.launch',
-                        'config:='+str(workspace/'src/hex_isaacgym/config'/('plane.yaml' if args.mode=='climb' else 'complex_surface4.yaml')),
+                        'config:='+str(workspace/'src/hex_isaacgym/config'/('quad_plane.yaml' if args.mode=='quad_climb' else ('plane.yaml' if args.mode=='climb' else 'complex_surface4.yaml'))),
                         'device:='+args.device,'headless:=true','to_sim_info:='+str(sim_info)])
                 wait_for(lambda:latest.get('feedback_ready'),'device feedback',90)
                 assert latest['phase']=='WAITING' and not any(counts.values()), (latest,counts)
@@ -216,6 +229,7 @@ def main():
                     wait_for(lambda:joy.get_num_connections()>0,'joystick subscription')
                 def service(name,success=True):
                     previous_reset = latest.get('reset_count',0)
+                    previous_counts = counts.copy()
                     rospy.wait_for_service('hex/runner/'+name,timeout=5)
                     if args.joystick and success and name in ('reset','start','pause'):
                         joy.publish(Joy(axes=[0.,0.,0.],buttons=[0]*8))
@@ -224,11 +238,13 @@ def main():
                         joy.publish(Joy(axes=[0.,0.,0.],buttons=pressed))
                         if name=='reset':
                             wait_for(lambda:latest.get('reset_count',0)>previous_reset,'joystick reset completed')
+                            wait_for(lambda:all(counts[n]>previous_counts[n] for n in counts),'joystick reset outputs')
                         return
                     result=rospy.ServiceProxy('hex/runner/'+name,Trigger)()
                     assert result.success==success,result
                     if name=='reset' and success:
                         wait_for(lambda:latest.get('reset_count',0)>previous_reset,'reset completed')
+                        wait_for(lambda:all(counts[n]>previous_counts[n] for n in counts),'reset outputs')
                 service('reset')
                 wait_for(lambda:latest.get('phase')=='READY','reset READY')
                 wait_for(lambda:all(counts.values()),'initial hold publications')
@@ -238,7 +254,7 @@ def main():
                     snapshot(sim_info).q[:,:3])
                 checks.append('reset commands configured initial joint and magnetic targets')
                 wait_for(lambda:velocity.get_num_connections()>0,'velocity subscription')
-                if args.mode=='climb':
+                if args.mode in ('climb', 'quad_climb'):
                     service('start',False);service('pause',False)
                     twist=Twist()
                     raw=[]
@@ -248,23 +264,41 @@ def main():
                         raw.append(value/scale if scale else 0.)
                     twist.linear.x,twist.linear.y,twist.angular.z=raw
                     peak_switches=0
+                    swing_order_seen=[]
+                    last_swing_count=0
+                    gait_phases_seen=set()
+                    max_swing_legs=0
                     initial_position=np.array([observed_pose.get(k,0.) for k in ('x','y','z')])
                     initial_rotation=transform_from_xyzw([0.,0.,0.],observed_pose['quaternion'])[:3,:3]
                     began=time.monotonic()
-                    end=began+(args.motion_seconds if args.motion_seconds is not None else ((160 if args.device.startswith('cuda') else 40) if args.backend=='isaac' else 1))
+                    end=began+(args.motion_seconds if args.motion_seconds is not None else ((160 if args.device.startswith('cuda') else (120 if args.mode == 'quad_climb' else 40)) if args.backend=='isaac' else 1))
                     while time.monotonic()<end:
                         velocity.publish(twist);time.sleep(.05)
                         assert latest['phase']!='FAULT',latest
                         peak_switches=max(peak_switches,latest.get('gait_switch_count',0))
+                        if args.mode == 'quad_climb':
+                            swing_legs=sum(not stance for stance in latest.get('gaits',[True]*4))
+                            max_swing_legs=max(max_swing_legs,swing_legs)
+                            assert swing_legs <= 1, ('multiple swing legs', latest)
+                            gait_phases_seen.add(latest.get('gait_phase'))
+                            if latest.get('gait_switch_count',0) > last_swing_count:
+                                swing_order_seen.append(latest.get('swing_leg_index'))
+                                last_swing_count=latest['gait_switch_count']
                         if args.motion_seconds is None and args.backend=='isaac' and peak_switches>=args.min_gait_switches and time.monotonic()-began>=10:
                             break
                     wait_for(lambda:latest.get('compute_count',0)>5,'climb control cycles')
                     moving_count=latest['compute_count']
                     motion_metrics=dict(compute_count_while_moving=moving_count, gait_switches_while_moving=peak_switches)
+                    if args.mode == 'quad_climb':
+                        motion_metrics.update(swing_order_seen=swing_order_seen,
+                                              gait_phases_seen=sorted(gait_phases_seen),
+                                              max_swing_legs=max_swing_legs)
+                        expected=config['initial_state']['sequence']
+                        assert swing_order_seen == [expected[i%4] for i in range(len(swing_order_seen))],motion_metrics
                     if args.backend=='isaac':
                         final_position=np.array([observed_pose.get(k,0.) for k in ('x','y','z')])
                         motion_metrics['displacement_m']=float(np.linalg.norm(final_position-initial_position))
-                        assert peak_switches >= args.min_gait_switches, ('climb failed to alternate support groups',latest)
+                        assert peak_switches >= args.min_gait_switches, ('climb failed to advance gait',latest)
                         assert motion_metrics['displacement_m']>.001,motion_metrics
                         displacement_body=initial_rotation.T@(final_position-initial_position)
                         motion_metrics['displacement_body_start_m']=displacement_body.tolist()
@@ -315,11 +349,8 @@ def main():
                     invalidator=rospy.ServiceProxy('test/invalidate',SetBool)
                     initial = snapshot(sim_info)
                     wait_for(lambda: latest.get('reset_count', 0) >= 2, 'reset applied before fault injection')
-                    reset_counts = counts.copy()
-                    wait_for(lambda: all(counts[name] > reset_counts[name] for name in counts),
-                             'all output channels refreshed after reset')
                     wait_for(lambda: read_servo_enabled(commands['servo']).all() and
-                             commands['motor'].option == 1 and
+                             commands['motor'].option == 2 and
                              np.allclose(read_motor(commands['motor'], 'pos'), initial.q[:, :3]) and
                              np.allclose(read_motor(commands['motor'], 'tau'), 0) and
                              np.allclose(read_servo(commands['servo']), initial.q[:, 3]) and
@@ -345,10 +376,10 @@ def main():
                     for _ in range(4):
                         pubs[0].publish(MultiLegCommand(option=0));pubs[1].publish(servo_cmd(enable=False))
                         pubs[2].publish(MagneticCmd());time.sleep(.05)
-                    wait_for(lambda:sim.get('motor_mode')==0 and sim.get('servo_enabled') == [False]*6,'zero torque/servo disable')
+                    wait_for(lambda:sim.get('motor_torque_max')==0 and sim.get('servo_enabled') == [False]*n,'zero torque/servo disable')
                     assert sim['motor_torque_max']==0 and sim['servo_torque_max']==0,sim
-                    pubs[0].publish(MultiLegCommand(option=2));time.sleep(.2)
-                    assert sim['motor_mode']==0,'unsupported mode was not rejected'
+                    pubs[0].publish(MultiLegCommand(option=99));time.sleep(.2)
+                    assert sim['motor_torque_max']==0,'unsupported mode changed torque'
                     resets=sim.get('reset_count',0)
                     rospy.ServiceProxy('hex/sim/reset',Trigger)()
                     wait_for(lambda:sim.get('reset_count',0)>resets,'physical reset')

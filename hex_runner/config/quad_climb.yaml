@@ -1,0 +1,65 @@
+# Four-leg indices: 0=lf, 1=lb, 2=rf, 3=rb; one swing leg at a time.
+workspace_root: ../../..
+expert_type: quad_climb
+pose_source: gravity
+control_dt: 0.01
+magnetic_hz: 30.0
+feedback_timeout: 0.5
+motor_kp: 100.0
+motor_kd: 1.0
+motor_torque_limit: 27.0
+robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/quad_all_magnetic.urdf
+expert_parameters:
+  magnetic_attach_above: 0.85
+  magnetic_release_below: 0.2
+  contact_force_threshold: 7.0
+  contact_confirm_steps: 10
+  contact_velocity_threshold: 0.1
+  torque_blend_time: 0.1
+  stance_height: 0.08
+velocity_scales:
+  vx: 0.3
+  vy: 0.4
+  wz: 0.5
+initial_state:
+  pose:
+    position:
+      x: 0.0
+      y: 0.0
+      z: 0.115
+    orientation:
+      x: 0.0
+      y: 0.0
+      z: 0.0
+      w: 1.0
+  sequence: [0,3,1,2]
+  ik_branch:
+    lf: 1
+    lb: 1
+    rf: 1
+    rb: 1
+  magnetic:
+    lf: true
+    lb: true
+    rf: true
+    rb: true
+  servo_enabled: true
+  mode: feet
+  frame: leg
+  feet:
+    lf:
+      x: 0.18
+      y: -0.08
+      z: -0.08
+    lb:
+      x: 0.18
+      y: 0.08
+      z: -0.08
+    rf:
+      x: 0.18
+      y: 0.08
+      z: -0.08
+    rb:
+      x: 0.18
+      y: -0.08
+      z: -0.08

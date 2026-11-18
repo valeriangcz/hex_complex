@@ -30,6 +30,35 @@ class ExpertClimb:
         joint_position_gain=45.0,
         magnetic_attach_above=0.85, magnetic_release_below=0.05,
     ):
+        self.groups = groups
+        self.initial_stance_group = stance_group
+        self._InitController(
+            kinematic=kinematic,
+            control_dt=control_dt,
+            motor_torque_limits=motor_torque_limits,
+            robot_urdf=robot_urdf,
+            motor_positions=motor_positions,
+            foot_positions=foot_positions,
+            ik_branch=ik_branch,
+            magnetic=magnetic,
+            contact_force_threshold=contact_force_threshold,
+            contact_confirm_steps=contact_confirm_steps,
+            contact_velocity_threshold=contact_velocity_threshold,
+            torque_blend_time=torque_blend_time,
+            stance_height=stance_height,
+            joint_position_gain=joint_position_gain,
+            magnetic_attach_above=magnetic_attach_above,
+            magnetic_release_below=magnetic_release_below)
+
+    def _InitController(
+        self, kinematic=None, *, control_dt=0.01, motor_torque_limits=27.0,
+        robot_urdf=None, motor_positions=None, foot_positions=None, ik_branch=None, magnetic=None,
+        contact_force_threshold=7.0,
+        contact_confirm_steps=10, contact_velocity_threshold=0.03,
+        torque_blend_time=0.1, stance_height=0.08,
+        joint_position_gain=45.0,
+        magnetic_attach_above=0.85, magnetic_release_below=0.05,
+    ):
         if kinematic is None:
             kinematic = Kinematic(urdf_path=robot_urdf)
         if not isinstance(kinematic, Kinematic):
@@ -51,16 +80,17 @@ class ExpertClimb:
             raise ValueError("contact_confirm_steps must be a positive integer")
         limits = np.asarray(motor_torque_limits, dtype=np.float64)
         if limits.ndim == 0:
-            limits = np.full((6, 3), limits.item())
-        if limits.shape != (6, 3) or not np.isfinite(limits).all() or (limits <= 0).any():
-            raise ValueError("motor_torque_limits must be positive finite scalar or (6,3)")
+            limits = np.full((kinematic.num_legs, 3), limits.item())
+        if limits.shape != (kinematic.num_legs, 3) or not np.isfinite(limits).all() or (limits <= 0).any():
+            raise ValueError("motor_torque_limits must be positive finite scalar or (num_legs,3)")
 
         self.kin = kinematic
         if not 0 <= magnetic_release_below < magnetic_attach_above <= 1:
             raise ValueError("require 0 <= magnetic_release_below < magnetic_attach_above <= 1")
         self.magnetic_attach_above = magnetic_attach_above
         self.magnetic_release_below = magnetic_release_below
-        self.leg_names = list(LEG_NAMES)
+        self.leg_names = list(kinematic.leg_names)
+        self.num_legs = kinematic.num_legs
         self.dt = float(control_dt)
         self.motor_torque_limits = limits.copy()
         self.contact_force_threshold = float(contact_force_threshold)
@@ -70,14 +100,7 @@ class ExpertClimb:
         self.joint_position_gain = float(joint_position_gain)
         self.torque_blend_steps = max(1, round(torque_blend_time / self.dt))
         self.total_mass = float(kinematic.total_mass)
-        self.groups = groups
-        self.initial_stance_group = stance_group
-        self._swing_start_leg = np.zeros((6, 3))
-        self._swing_start_leg[:, 0] = 0.18
-        self._swing_start_leg[:, 2] = 0.04
-        self._swing_start_leg[[2, 5], 0] = 0.19
-        self._swing_start_leg[[0, 4], 1] = 0.08
-        self._swing_start_leg[[1, 3], 1] = -0.08
+        self._swing_start_leg = self._MakeSwingStartLeg()
         self.Reset()
         self.initial_q = None
         if motor_positions is not None or foot_positions is not None:
@@ -87,6 +110,26 @@ class ExpertClimb:
             self.SetInit(self.initial_q)
             if magnetic is not None:
                 self.adhesions[:] = magnetic
+
+    def _MakeSwingStartLeg(self):
+        points = np.zeros((self.num_legs, 3))
+        for i, name in enumerate(self.leg_names):
+            points[i] = [0.19 if name.endswith("m") else 0.18,
+                         0.08 if name in ("lb", "rf") else (-0.08 if name in ("lf", "rb") else 0.), 0.04]
+        return points
+
+    def _SolveSupportForces(self, arms, gravity_body):
+        if len(arms) < 3:
+            return None
+        A = np.vstack((np.tile(np.eye(3), (1, len(arms))),
+                       np.hstack([self._Skew(arm) for arm in arms])))
+        b = np.r_[-self.total_mass * gravity_body, np.zeros(3)]
+        if np.linalg.matrix_rank(A) != 6:
+            return None
+        forces = A.T @ np.linalg.pinv(A @ A.T, rcond=1e-9) @ b
+        if not np.isfinite(forces).all() or np.linalg.norm(A @ forces - b) > 1e-5 * max(1., np.linalg.norm(b)):
+            return None
+        return forces.reshape(-1, 3)
 
     @staticmethod
     def _array(value, shape, name):
@@ -102,40 +145,49 @@ class ExpertClimb:
         Robot parameters and physical limits are preserved.
         """
         if q_init is not None:
-            q_init = self._array(q_init, (6, 4), "q_init")
-        self.gaits = np.zeros(6, dtype=bool)
-        self.adhesions = np.zeros(6, dtype=bool)
-        self._swing_reached = np.zeros(6, dtype=bool)
-        self.contact_count = np.zeros(6, dtype=np.int64)
+            self._array(q_init, (self.num_legs, 4), "q_init")
         self.stance_group_index = self.initial_stance_group
-        self.q_des = np.zeros((6, 4))
-        self._foot_target_leg = np.zeros((6, 3))
-        self.B_e_cur = np.zeros((3, 6))
+        self._ResetState(q_init)
+
+    def _ResetState(self, q_init=None):
+        """Reset buffers shared by grouped and sequential controllers."""
+        if q_init is not None:
+            q_init = self._array(q_init, (self.num_legs, 4), "q_init")
+        self.gaits = np.zeros(self.num_legs, dtype=bool)
+        self.adhesions = np.zeros(self.num_legs, dtype=bool)
+        self._swing_reached = np.zeros(self.num_legs, dtype=bool)
+        self.contact_count = np.zeros(self.num_legs, dtype=np.int64)
+        self.q_des = np.zeros((self.num_legs, 4))
+        self._foot_target_leg = np.zeros((self.num_legs, 3))
+        self.B_e_cur = np.zeros((3, self.num_legs))
         # Planar climbing uses local +z as the surface outward normal.
-        self.B_landing_n = np.zeros((3, 6))
+        self.B_landing_n = np.zeros((3, self.num_legs))
         self.B_landing_n[2] = 1.0
         self.B_support_n = self.B_landing_n.copy()
-        self.estimated_contact_force = np.zeros(6)
-        self.normal_foot_velocity = np.zeros(6)
+        self.estimated_contact_force = np.zeros(self.num_legs)
+        self.normal_foot_velocity = np.zeros(self.num_legs)
         self._previous_contact_feet = None
-        self.tau_ff = np.zeros((6, 3))
-        self.static_contact_forces_R = np.zeros((6, 3))
-        self._feedforward_support_mask = np.zeros(6, dtype=bool)
-        self._feedforward_blend_start = np.zeros((6, 3))
+        self.tau_ff = np.zeros((self.num_legs, 3))
+        self.static_contact_forces_R = np.zeros((self.num_legs, 3))
+        self._feedforward_support_mask = np.zeros(self.num_legs, dtype=bool)
+        self._feedforward_blend_start = np.zeros((self.num_legs, 3))
         self._torque_blend_remaining = 0
         self.compute_count = 0
         self.set_init = False
         if q_init is not None:
             self._initialize(q_init)
 
-    def _initialize(self, q_init):
+    def _AnchorTargets(self, q_init):
         self.q_des[:] = q_init
         self.kin.ForwardKin(q_init[:, :3], self._foot_target_leg)
         self.B_e_cur[:] = self._foot_target_leg.T
         self._previous_contact_feet = self._foot_target_leg.copy()
+        self.set_init = True
+
+    def _initialize(self, q_init):
+        self._AnchorTargets(q_init)
         self.gaits[self.groups[self.stance_group_index]] = True
         self.adhesions[:] = self.gaits
-        self.set_init = True
 
     def SetInit(self, q_init):
         """Reset and anchor gait/foot targets to q_init, returning snapshots."""
@@ -147,10 +199,11 @@ class ExpertClimb:
 
         gravity_direction_body: finite nonzero (3,) downward direction in body.
         The direction is normalized internally; gravity magnitude is 9.81 m/s².
-        q_cur: (6,4) drive angles; q_torque: (6,3) measured motor torques.
-        attached: (6,) normalized per-foot sensor ratios in [0, 1].
+        q_cur: (N,4) drive angles; q_torque: (N,3) measured motor torques.
+        attached: (N,) normalized per-foot sensor ratios in [0, 1].
         command: (3,) body vx/vy in m/s and yaw rate in rad/s.
-        Returns q_des (6,4), tau_ff (6,3), adhesions (6,), servo_enabled (6,).
+        Returns q_des (N,4), tau_ff (N,3), adhesions (N,), servo_enabled (N,).
+        N is the kinematic model leg count.
         Stance servos are passive; swing servos track their target angles.
         """
         direction = self._array(gravity_direction_body, (3,), "gravity_direction_body")
@@ -159,11 +212,11 @@ class ExpertClimb:
             raise ValueError("gravity_direction_body must be nonzero")
         direction = direction / scale
         gravity_body = 9.81 * direction / np.linalg.norm(direction)
-        q_cur = self._array(q_cur, (6, 4), "q_cur")
-        q_torque = self._array(q_torque, (6, 3), "q_torque")
+        q_cur = self._array(q_cur, (self.num_legs, 4), "q_cur")
+        q_torque = self._array(q_torque, (self.num_legs, 3), "q_torque")
         attached = np.asarray(attached, dtype=float)
-        if attached.shape != (6,) or not np.isfinite(attached).all() or ((attached < 0) | (attached > 1)).any():
-            raise ValueError("attached must contain six finite ratios in [0, 1]")
+        if attached.shape != (self.num_legs,) or not np.isfinite(attached).all() or ((attached < 0) | (attached > 1)).any():
+            raise ValueError("attached must contain one finite ratio per leg in [0, 1]")
         command = self._array(command, (3,), "command")
         if not self.set_init:
             self._initialize(q_cur)
@@ -183,7 +236,6 @@ class ExpertClimb:
         com = self.kin.ForwardKinAll(q_cur)["R_com"]
         self._ComputeQuasiStaticTauFF(gravity_body, q_cur[:, :3], com)
         self.compute_count += 1
-        print("compute single step")
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     def _ContactDetection(self, q_cur, q_torque):
@@ -195,7 +247,7 @@ class ExpertClimb:
         """
         force = self.kin.CF_Estimate(q_torque, q_cur)
         self.estimated_contact_force[:] = np.sum(force * self.B_landing_n.T, axis=1)
-        feet = np.empty((6, 3))
+        feet = np.empty((self.num_legs, 3))
         self.kin.ForwardKin(q_cur, feet)
         if self._previous_contact_feet is None:
             self.normal_foot_velocity.fill(np.inf)
@@ -274,7 +326,7 @@ class ExpertClimb:
         return transform
 
     def _ComputeFootTargets(self, command):
-        indices = np.arange(6)
+        indices = np.arange(self.num_legs)
         feet_R = self.kin._B2R(self._foot_target_leg.T, indices).T
         next_R = np.empty_like(feet_R)
         for stance, sign in ((True, 1.0), (False, -1.0)):
@@ -326,8 +378,8 @@ class ExpertClimb:
                 & (angle >= -np.pi / 4.0) & (angle <= np.pi / 4.0))
 
     def _CheckLegClearance(self, feet):
-        feet_R = self.kin._B2R(feet.T, np.arange(6)).T
-        free = np.zeros(6, dtype=bool)
+        feet_R = self.kin._B2R(feet.T, np.arange(self.num_legs)).T
+        free = np.zeros(self.num_legs, dtype=bool)
         for back, front, middle in ((0, 1, 2), (3, 4, 5)):
             free[back] = np.linalg.norm(feet_R[back, :2] - feet_R[middle, :2]) > 0.06
             free[front] = np.linalg.norm(feet_R[front, :2] - feet_R[middle, :2]) > 0.06
@@ -347,26 +399,16 @@ class ExpertClimb:
         """
         support = self.gaits & self.adhesions
         indices = np.flatnonzero(support)
-        target_tau = np.zeros((6, 3))
+        target_tau = np.zeros((self.num_legs, 3))
         self.static_contact_forces_R.fill(0.0)
-        if indices.size >= 3:
+        if indices.size:
             feet_R = self.kin._B2R(self.B_e_cur[:, indices], indices).T
-            arms = feet_R - R_com
-            A = np.zeros((6, 3 * indices.size))
-            for column, arm in enumerate(arms):
-                A[:3, 3 * column:3 * column + 3] = np.eye(3)
-                A[3:, 3 * column:3 * column + 3] = self._Skew(arm)
-            b = np.r_[-self.total_mass * gravity_body, np.zeros(3)]
-            if np.linalg.matrix_rank(A) == 6:
-                forces = A.T @ np.linalg.pinv(A @ A.T, rcond=1e-9) @ b
-                if (np.isfinite(forces).all()
-                        and np.linalg.norm(A @ forces - b) <= 1e-5 * max(1.0, np.linalg.norm(b))):
-                    forces = forces.reshape(-1, 3)
-                    self.static_contact_forces_R[indices] = forces
-                    forces_leg = self.kin.RVectorToLeg(forces.T, indices).T
-                    target_tau[indices] = -np.einsum(
-                        "nai,na->ni", self.kin.Jacobian(q_cur[indices]), forces_leg
-                    )
+            forces = self._SolveSupportForces(feet_R - R_com, gravity_body)
+            if forces is not None:
+                self.static_contact_forces_R[indices] = forces
+                forces_leg = self.kin.RVectorToLeg(forces.T, indices).T
+                target_tau[indices] = -np.einsum(
+                    "nai,na->ni", self.kin.Jacobian(q_cur[indices]), forces_leg)
         target_tau = np.clip(target_tau, -self.motor_torque_limits, self.motor_torque_limits)
         if not np.array_equal(support, self._feedforward_support_mask):
             self._feedforward_blend_start[:] = self.tau_ff
