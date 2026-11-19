@@ -5,10 +5,10 @@ initialization:
   staged: true
 pose_source: gravity
 control_dt: 0.01
-magnetic_hz: 30.0
+magnetic_hz: 50.0
 feedback_timeout: 0.5
 motor_kp: 100.0
-motor_kd: 1.0
+motor_kd: 1.2
 motor_torque_limit: 27.0
 robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 expert_parameters:

@@ -34,3 +34,11 @@ docker run -it \
   ros1_isaacgym:v1  \
   bash
   ```
+
+
+  catkin_make不编译tests中的内容
+  git 中没有追踪tests
+  ```
+  catkin_make -DCATKIN_ENABLE_TESTING=OFF
+  ```
+  

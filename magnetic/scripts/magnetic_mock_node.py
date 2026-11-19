@@ -30,7 +30,7 @@ class MagneticMockNode:
             with self.lock:
                 self.port.write(data)
                 self.enabled = tuple(getattr(message, leg) for leg in LEG_NAMES)
-            rospy.loginfo("TX %r", data)
+            # rospy.loginfo("TX %r", data)
         except (serial.SerialException, OSError) as error:
             rospy.logfatal("magnetic mock serial write failed: %s", error)
             rospy.signal_shutdown(str(error))
@@ -50,8 +50,8 @@ class MagneticMockNode:
         try:
             while not rospy.is_shutdown():
                 data = self.port.read(max(1, self.port.in_waiting))
-                if data:
-                    rospy.loginfo("RX %r", data)
+                # if data:
+                #     rospy.loginfo("RX %r", data)
         finally:
             self.timer.shutdown()
             self.subscriber.unregister()

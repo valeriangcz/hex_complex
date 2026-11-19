@@ -6,9 +6,9 @@ channel_order: [lf, lm, lb, rf, rm, rb]
 lower_bound: 0
 upper_bound: 4095
 calibration:
-  lf: {raw_min: 0, raw_max: 4095}
-  lm: {raw_min: 0, raw_max: 4095}
-  lb: {raw_min: 0, raw_max: 4095}
-  rf: {raw_min: 0, raw_max: 4095}
-  rm: {raw_min: 0, raw_max: 4095}
-  rb: {raw_min: 0, raw_max: 4095}
+  lf: {raw_min: 2090, raw_max: 2500}
+  lm: {raw_min: 2010, raw_max: 2350}
+  lb: {raw_min: 2050, raw_max: 2400}
+  rf: {raw_min: 2010, raw_max: 2340}
+  rm: {raw_min: 2040, raw_max: 2410}
+  rb: {raw_min: 2040, raw_max: 2400}

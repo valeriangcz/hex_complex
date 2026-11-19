@@ -18,4 +18,4 @@ speed: 800
 read_timeout_ms: 20
 
 # Poll feedback even before receiving commands; 0 selects command-only feedback.
-state_hz: 0.0
+state_hz: 5.0

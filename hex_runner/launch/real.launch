@@ -5,9 +5,12 @@
   <arg name="output_dir" default=""/>
   <arg name="can_interface" default="can0"/>
   <arg name="servo_config" default="$(find feetech_servo)/para/servo.yaml"/>
+
   <!-- Empty means no provider. Missing sensor feedback keeps runner WAITING. -->
-  <arg name="magnetic_launch" default=""/>
-  <arg name="perception_launch" default=""/>
+  <!-- <arg name="magnetic_launch" default="$(find magnetic)/launch/magnetic.launch"/> -->
+  <arg name="magnetic_launch" default="$(find magnetic)/launch/magnetic_mock.launch"/>
+  
+  <arg name="perception_launch" default="$(find perception)/launch/imu.launch"/>
   <node pkg="dm_motor_fusion" type="dm_motor_fusion_node" name="dm_motor_fusion_node" output="screen" required="true">
     <param name="can_interface" value="$(arg can_interface)"/>
     <param name="control_hz" value="100.0"/><param name="status_hz" value="100.0"/>

@@ -16,8 +16,8 @@ class InitStage(str, Enum):
 
 class StagedInitialization:
     JOINT_SPEED = 1.0  # rad/s, including the servo angle
-    MOTOR_TOLERANCE = 0.03
-    SERVO_TOLERANCE = 0.05
+    MOTOR_TOLERANCE = 0.1
+    SERVO_TOLERANCE = 0.1
     CONFIRM_SAMPLES = 10
 
     def __init__(self, config, adapter):
@@ -70,10 +70,16 @@ class StagedInitialization:
                 self.zero_sample = None if feedback is None else feedback.motor_sample
                 return None, 'zero', False
             if feedback is None:
-                self.waiting_reason = unavailable or 'waiting for complete fresh feedback'
+                reason = unavailable or 'wairting for complete fresh feedback'
+                if self.waiting_reason != reason:
+                    banner('INIT',self.stage.value, reason,'yellow')
+                self.waiting_reason = reason
                 return self.command, 'zero', False
             if self.zero_sample is not None and feedback.motor_sample == self.zero_sample:
-                self.waiting_reason = 'waiting for a new motor sample after zero torque'
+                reason = 'waiting for a new motor sample after zero torque'
+                if reason != self.waiting_reason:
+                    banner('INIT', self.stage.value, reason, 'yellow')
+                self.waiting_reason = reason
                 return self.command, 'zero', False
             self._set_stage(InitStage.WAIT_RELEASE)
             threshold = self.config.expert_parameters.get('magnetic_release_below',0.05)

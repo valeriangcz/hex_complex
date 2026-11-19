@@ -27,7 +27,7 @@ class ExpertClimb:
         contact_force_threshold=7.0,
         contact_confirm_steps=10, contact_velocity_threshold=0.03,
         torque_blend_time=0.1, stance_height=0.08,
-        joint_position_gain=45.0,
+        joint_position_gain=80.0,
         magnetic_attach_above=0.85, magnetic_release_below=0.05,
     ):
         self.groups = groups
@@ -236,6 +236,8 @@ class ExpertClimb:
         com = self.kin.ForwardKinAll(q_cur)["R_com"]
         self._ComputeQuasiStaticTauFF(gravity_body, q_cur[:, :3], com)
         self.compute_count += 1
+        #暂时取消力前馈
+        self.tau_ff.fill(0.0)
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     def _ContactDetection(self, q_cur, q_torque):
@@ -258,8 +260,6 @@ class ExpertClimb:
         contact = ((self.estimated_contact_force <= -self.contact_force_threshold)
                    & (np.abs(self.normal_foot_velocity) <= self.contact_velocity_threshold)
                    & ~self.gaits & self._swing_reached)
-        #为了方便调试，加入使用高度判断的落地检测
-        # contact |= (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
 
         # Scattered dynamic-load spikes must not accumulate into a false landing.
         self.contact_count[~contact] = 0
@@ -267,6 +267,9 @@ class ExpertClimb:
         detected = self.contact_count >= self.contact_confirm_steps
         self.contact_count[detected] = 0
         self.B_support_n[:, detected] = self.B_landing_n[:, detected]
+        
+        #为了方便调试，加入使用高度判断的落地检测
+        detected = (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
         return detected
 
     def _PlanGait(self, command, q_cur, q_torque, attached):
@@ -277,7 +280,8 @@ class ExpertClimb:
         landed = self._ContactDetection(q_cur, q_torque)
         # Start stance from the measured touchdown, not the deeper press target.
         self._foot_target_leg[landed] = self.B_e_cur.T[landed]
-        self.gaits[landed|confirmed_attached] = True
+        # self.gaits[landed|confirmed_attached] = True
+        self.gaits[landed] = True
         self.adhesions[:] = self.gaits
         next_targets = self._ComputeFootTargets(command)
 
@@ -336,7 +340,7 @@ class ExpertClimb:
         next_leg = self.kin._R2B(next_R.T, indices).T
         feet = self._foot_target_leg
         # A reached target is not proof that the measured foot has lifted.
-        self._swing_reached |= self.B_e_cur[2] >= self._swing_start_leg[:, 2] - 0.005
+        self._swing_reached |= self._foot_target_leg[:,2] >= self._swing_start_leg[:, 2] - 0.005
         returning = ~self._swing_reached & ~self.gaits
         speed_z = min(1.2, max(np.linalg.norm(command[:2]) * 1.5, abs(command[2]) * 1.2))
         # Keep a nonzero approach rate: the old zero lower bound trapped

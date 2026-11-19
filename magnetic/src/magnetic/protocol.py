@@ -50,6 +50,7 @@ class Protocol:
             ratio = (raw - item["raw_min"]) / (item["raw_max"] - item["raw_min"])
             valid = self.lower <= raw <= self.upper and output in (0, 1)
             result[leg] = (max(0.0, min(1.0, ratio)), output == 1, valid, raw, output)
+            # print(result)
         return result
 
     def encode(self, message):
