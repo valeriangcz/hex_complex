@@ -10,7 +10,9 @@ class MultiMotorSinNode:
         rospy.init_node("multi_motor_sin90")
 
         self.publish_hz = rospy.get_param("~publish_hz", 200.0)
-        self.option = int(rospy.get_param("~option", 2))  # 2: pos_vel / 轨迹跟踪
+        self.option = int(rospy.get_param("~option", 1))  # 1: MIT 轨迹跟踪
+        if self.option not in (-1, 0, 1):
+            raise ValueError("option must be -1, 0 or 1")
         self.amp_deg = float(rospy.get_param("~amplitude_deg", 90.0))
         self.base_freq_hz = float(rospy.get_param("~base_freq_hz", 0.15))
         self.freq_step_hz = float(rospy.get_param("~freq_step_hz", 0.02))

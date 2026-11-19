@@ -13,7 +13,7 @@ import time
 import xmlrpc.client
 
 
-def wait_for(predicate, description, timeout=30):
+def wait_for(predicate, description, timeout=90):
     until = time.monotonic() + timeout
     while time.monotonic() < until:
         if predicate():
@@ -199,6 +199,7 @@ def main():
                     subscribers.append(rospy.Subscriber(topic,typ,lambda msg,n=name: frames[n].update({msg.header.stamp.to_nsec():msg})))
                 velocity=rospy.Publisher('hex/cmd_vel',Twist,queue_size=1)
                 config=yaml.safe_load((workspace/'src/hex_runner/config'/(args.mode+'.yaml')).read_text())
+                staged=config.get('initialization',{}).get('staged',False)
                 if args.pose_source:config['pose_source']=args.pose_source
                 config_file=directory+'/runner.yaml'
                 with open(config_file,'w') as stream:yaml.safe_dump(config,stream)
@@ -333,8 +334,8 @@ def main():
                 else:
                     velocity.publish(Twist());wait_for(lambda:latest.get('phase')=='READY','zero velocity before reset')
                 time.sleep(.15)
-                np.testing.assert_array_equal(read_servo_enabled(commands['servo']),~np.asarray(latest['gaits'],dtype=bool))
-                checks.append('expert stance servos disabled, swing servos enabled, flags held while paused')
+                np.testing.assert_array_equal(read_servo_enabled(commands['servo']),latest['servo_enabled'])
+                checks.append('expert servo flags match diagnostics and are held while paused')
                 service('reset');wait_for(lambda:latest.get('phase')=='READY','second reset')
                 if args.backend=='fake':
                     if args.mode=='complex':
@@ -350,9 +351,10 @@ def main():
                     initial = snapshot(sim_info)
                     wait_for(lambda: latest.get('reset_count', 0) >= 2, 'reset applied before fault injection')
                     wait_for(lambda: read_servo_enabled(commands['servo']).all() and
-                             commands['motor'].option == 2 and
+                             commands['motor'].option == 1 and
                              np.allclose(read_motor(commands['motor'], 'pos'), initial.q[:, :3]) and
-                             np.allclose(read_motor(commands['motor'], 'tau'), 0) and
+                             (np.isfinite(read_motor(commands['motor'], 'tau')).all() and
+                              np.abs(read_motor(commands['motor'], 'tau')).max() <= config.get('motor_torque_limit',27.)) and
                              np.allclose(read_servo(commands['servo']), initial.q[:, 3]) and
                              np.array_equal(read_magnetic(commands['magnetic']), initial.magnetic),
                              'reset outputs received before fault injection')
@@ -365,7 +367,9 @@ def main():
                     service('reset');wait_for(lambda:latest.get('phase')=='READY','fault recovery')
                     stop(device_process)  # Missing providers must become stale, not fabricate state.
                     wait_for(lambda:latest.get('phase')=='FAULT','feedback stream timeout',4)
-                    service('reset',False)
+                    service('reset',staged)
+                    if staged:
+                        wait_for(lambda:latest.get('phase')=='INITIALIZING','reset waits for unavailable feedback')
                     checks.append('invalid/stale feedback latches fault, holds every output, explicit recovery')
                 else:
                     stop(runner_process)

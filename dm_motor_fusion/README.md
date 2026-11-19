@@ -25,7 +25,6 @@
 | `-1` (`OPTION_DISABLE`) | 失能 | 节点自动下发 disable，忽略所有字段 |
 | `0` (`OPTION_ZERO_TORQUE`) | 零力矩 | 节点强制 kp/kd/tau=0（腿软），忽略消息数值 |
 | `1` (`OPTION_MIT`) | MIT 全参数 | pos/vel/tau + kp/kd 全部生效 |
-| `2` (`OPTION_POS_VEL`) | 位置速度 | pos/vel 生效，tau/kp/kd 忽略 |
 
 ### 1.2 每腿字段（LegCommand / LegState）
 
@@ -96,8 +95,8 @@ roslaunch dm_motor_fusion dm_motor.launch can_interface:=can0 motor_type:=2
 ### 4.3 测试脚本（正弦摆动）
 
 ```bash
-# 所有电机 90° 正弦摆动，option=2 位置速度模式；连真机前务必确认安全！
-rosrun dm_motor_fusion multi_motor_sin90.py _option:=2 _amplitude_deg:=90
+# 所有电机 90° 正弦摆动，option=1 MIT 模式；连真机前务必确认安全！
+rosrun dm_motor_fusion multi_motor_sin90.py _option:=1 _amplitude_deg:=90
 # 可选参数：~publish_hz ~base_freq_hz ~freq_step_hz ~phase_step_deg ~kp ~kd
 ```
 
@@ -142,7 +141,6 @@ dm_motor_fusion/
 
 - ⚠️ 该节点会向真实电机发送使能与力矩/位置指令，联调时先小 kp、低位姿验证电机方向（尤其右侧三腿膝部 pn=−1），确认无误后再放大幅值。
 - 消息中的 `kp/kd` 会直接下发到电机 MIT 模式寄存器，`option=1` 时请确保已给合理值（0 会使电机软掉）。
-- `option=2` 目前节点内部仍按 MIT 模式发送（`switchMotorMode` 固定 MIT），等效于"用消息里的 kp/kd 做位置跟踪"。
 
 
 ## hex_runner 公共接口

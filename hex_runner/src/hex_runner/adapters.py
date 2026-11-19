@@ -1,5 +1,6 @@
 """Expert lifecycle bound to measured ROS feedback, never a physics object."""
 import numpy as np
+from copy import deepcopy
 from scipy.spatial.transform import Rotation
 from spatialmath import SE3
 from hex_expert import ExpertClimb, ExpertComplex, ExpertQuadClimb
@@ -17,9 +18,18 @@ class ExpertAdapter:
         common.update(dict(sequence=initial.sequence) if config.expert_type == "quad_climb"
                       else dict(groups=initial.groups, stance_group=initial.stance_group))
         if config.expert_type == "complex":
+            manual = config.initialization_method == 'set_init'
             self.expert = ExpertComplex(resources=config.resources,
-                                       initial_pose=None if initial.W_T_R is None else SE3(initial.W_T_R),
-                                       initial_waypoint_index=initial.waypoint_index,**common)
+                                       initial_pose=None if manual or initial.W_T_R is None else SE3(initial.W_T_R),
+                                       initial_waypoint_index=None if manual else initial.waypoint_index,**common)
+            if manual:
+                from hex_expert.initial_state import climb_initial_joints
+                self.expert.q3_branches[:] = initial.ik_branch
+                self.manual_initial_q = climb_initial_joints(self.expert.kin,motor_positions=initial.motor_positions,
+                    foot_positions=initial.foot_positions,ik_branch=initial.ik_branch)
+                self.expert.SetInit(self.manual_initial_q,initial_pose=None if initial.W_T_R is None else SE3(initial.W_T_R),
+                    initial_waypoint_index=initial.waypoint_index)
+                self.expert.adhesions[:] = initial.magnetic
         else:
             controller = ExpertQuadClimb if config.expert_type == "quad_climb" else ExpertClimb
             self.expert = controller(motor_positions=initial.motor_positions,
@@ -40,19 +50,63 @@ class ExpertAdapter:
                 servo_enabled=initial.servo_enabled),
             reference_path=[pose.t.tolist() for pose in path]))
 
-    def reset(self, feedback):
+    def prepare_initialization(self):
+        """Compute one final target, independently of how runner will reach it."""
         initial = self.config.initial_state
         if self.config.expert_type == "complex":
-            self.expert.SetInitBySE3(ik_branch=initial.ik_branch,
-                initial_pose=None if initial.W_T_R is None else SE3(initial.W_T_R),
-                initial_waypoint_index=initial.waypoint_index)
+            if self.config.initialization_method == 'set_init':
+                self.expert.q3_branches[:] = initial.ik_branch
+                self.expert.SetInit(self.manual_initial_q,
+                    initial_pose=None if initial.W_T_R is None else SE3(initial.W_T_R),
+                    initial_waypoint_index=initial.waypoint_index)
+            else:
+                self.expert.SetInitBySE3(ik_branch=initial.ik_branch,
+                    initial_pose=None if initial.W_T_R is None else SE3(initial.W_T_R),
+                    initial_waypoint_index=initial.waypoint_index)
         else:
             self.expert.SetInit(self.expert.initial_q)
         self.expert.adhesions[:] = initial.magnetic
         self.switch_count = 0
         self.export_sim_info()
+        # Only small control-state fields are copied; models, caches and paths stay shared.
+        fields = (
+            'q_des','B_e_cur','B_landing_n','B_support_n','landing_point','W_landing_points',
+            'q3_branches','gaits','last_gaits','adhesions','initial_pose',
+            '_foot_target_leg','_previous_contact_feet','static_contact_forces_R',
+            '_tau_ff_support_mask','_tau_ff_transition_start','_tau_ff_transition_remaining',
+            '_feedforward_support_mask','_feedforward_blend_start','_torque_blend_remaining',
+        )
+        self._initial_target_state = {name:deepcopy(getattr(self.expert,name))
+                                      for name in fields if hasattr(self.expert,name)}
         return (self.expert.q_des.copy(),self.expert.tau_ff.copy(),
                 self.expert.adhesions.copy(),np.ones(len(self.config.leg_names),dtype=bool))
+
+    def initialization_lift_target(self):
+        from hex_expert.initial_state import climb_initial_joints
+        points = np.array([[.18,.08,.04],[.18,-.08,.04],[.19,0.,.04],
+                           [.18,-.08,.04],[.18,.08,.04],[.19,0.,.04]])
+        return climb_initial_joints(self.expert.kin,foot_positions=points,
+                                   ik_branch=self.config.initial_state.ik_branch)
+
+    def initialization_feedforward(self,feedback,adhesions):
+        e = self.expert
+        fk = e.kin.ForwardKinAll(feedback.q)
+        e.B_e_cur[:] = fk['B_foot'].T
+        e.adhesions[:] = adhesions
+        if self.config.expert_type == 'complex':
+            tau = e._ComputeQuasiStaticTauFF(SE3(feedback.pose,check=False),feedback.q[:,:3],fk['R_com'],feedback.attached)
+        else:
+            direction = feedback.gravity_direction_body
+            tau = e._ComputeQuasiStaticTauFF(9.81*direction/np.linalg.norm(direction),feedback.q[:,:3],fk['R_com'])
+        return tau.copy()
+
+    def finish_initialization(self,feedback,command):
+        # Commit exactly the target prepared before interpolation, including SE3 normals.
+        # Re-running a solver here could silently select different landing points.
+        for name,value in self._initial_target_state.items():
+            setattr(self.expert,name,deepcopy(value))
+        # Let the expert's existing support-transition blend start at the held torque.
+        self.expert.tau_ff[:] = command.tau
 
     def compute(self, feedback, velocity):
         sequential = self.config.expert_type == "quad_climb"
@@ -107,3 +161,12 @@ class ExpertAdapter:
                          sequence=list(e.sequence), sequence_index=e.sequence_index)
             value["support_moment_residual_R"] = getattr(e, "support_moment_residual_R", np.zeros(3)).tolist()
         return value
+
+    def planning_snapshot(self):
+        """Read-only native complex planning state; recorder owns copied snapshots."""
+        e = self.expert
+        return dict(landing_leg=e.landing_point.T, landing_world=e.W_landing_points.T,
+                    stance=e.gaits, trajectory_index=e.q_traj_index,
+                    feet=e.B_e_traj, body=e.interp_path_T,
+                    follow_path_index=e.follow_path_index,
+                    swing_failures=getattr(e, '_last_swing_planning_failures', {}))

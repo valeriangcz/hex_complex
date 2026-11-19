@@ -1,5 +1,5 @@
 # All six-element arrays use this order: lf, lm, lb, rf, rm, rb.
-port: /dev/ttyUSB0
+port: /dev/feetech
 baud_rate: 1000000
 ids: [1, 2, 3, 4, 5, 6]
 

@@ -255,6 +255,63 @@ class ExpertComplex:
             neighbor_ankle_distances=neighbor_ankle_distances)
         return int(np.argmin(costs))
 
+    def SetInit(self,q_init,*,initial_pose=None,initial_waypoint_index=None):
+        """Anchor a manually configured target; runner performs physical initialization."""
+        if not self.path_se3:
+            raise RuntimeError("Use LoadSE3 before SetInit")
+        q_init = np.array(q_init,dtype=float,copy=True)
+        if q_init.shape != (6,4) or not np.isfinite(q_init).all():
+            raise ValueError("q_init must be a finite (6,4) array")
+        limits = np.stack([np.vstack((self.kin.joints_limits_thigh[i],self.kin.joints_limits_rest)) for i in range(6)])
+        if ((q_init[:,:3]<limits[:,:,0]-1e-6)|(q_init[:,:3]>limits[:,:,1]+1e-6)).any():
+            raise ValueError("Initial motor angles exceed joint limits")
+        branches = self.q3_branches.copy()
+        if ((q_init[:,2]>1e-8)&(branches!=0)|(q_init[:,2]<-1e-8)&(branches!=1)).any():
+            raise ValueError("Initial motor angles do not match IK branches")
+        pose = self._ResolveInitialPose(initial_pose,initial_waypoint_index)
+        self.set_init = False
+        self.q_des.fill(0.0)
+        #设置腿部步态初始值
+        self.stance_group_index = self.initial_stance_group
+        self.gaits.fill(0)
+        self.gaits[self.groups[self.stance_group_index]] = 1
+        self.adhesions.fill(0)
+        self.adhesions[self.gaits] = 1
+        self.last_gaits[:] = self.gaits[:]
+        #清空腿末端轨迹
+        self.B_e_traj.clear()
+        self.q_traj = [None for _ in range(6)]
+        self.B_e_traj_len.fill(0)
+        self.q_traj_index.fill(0)
+        self.B_landing_n.fill(0.0)
+        self.B_support_n.fill(0.0)
+        self.B_landing_n[2,:] = 1.0
+        self.B_support_n[2,:] = 1.0
+        self.tau_ff.fill(0.0)
+        self.static_contact_forces_R.fill(0.0)
+        self._tau_ff_support_mask.fill(False)
+        self._tau_ff_transition_start.fill(0.0)
+        self._tau_ff_transition_remaining = 0
+        self.singularity_legs.fill(False)
+        self.hold_q.fill(0.0)
+        self.contact_count.fill(0)
+        self.q3_branches[:] = branches
+        self.follow_path_index = 0
+        self.interp_path_se3.clear()
+        self.interp_path_T = []
+        self.B_e_cur.fill(0.0)
+        self.landing_point.fill(0.0)
+        self.W_landing_points.fill(0.0)
+
+        self.q_des[:] = q_init
+        fk = self.kin.ForwardKinAll(q_init)
+        self.B_e_cur[:] = fk['B_foot'].T
+        self.landing_point[:] = self.B_e_cur
+        self.W_landing_points[:] = pose*self.kin._B2R(self.B_e_cur,np.arange(6))
+        self.initial_pose = pose.copy()
+        self.set_init = True
+        return self.q_des.copy(),self.tau_ff.copy(),self.adhesions.copy()
+
     def SetInitBySE3(self,attached:np.ndarray|None=None,*,ik_branch=None,initial_pose:SE3|None=None,
                      initial_waypoint_index=None):
         """清空运行状态，并按环境、初始机身位姿和指定分支选择支撑落脚点。
@@ -386,9 +443,9 @@ class ExpertComplex:
         self.GaitPlanning(cur_se3,q_motor,q_torque,attached) #更新步态，更新B_e_des_traj
         self.GetJointAngles(q_motor)# 根据当前角度和期望执行的B_e_des计算目标角度
         self._ComputeQuasiStaticTauFF(cur_se3,q_motor,fk_result["R_com"],attached)
-        # return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
+        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
         #return 的最后一位标识哪些需要舵机势能，也就是siwng腿，测试使用所有的舵机都上势能
-        return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), np.ones((6,),dtype=np.bool_)
+        # return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), np.ones((6,),dtype=np.bool_)
 
     @staticmethod
     def _Skew(vector:np.ndarray)->np.ndarray:

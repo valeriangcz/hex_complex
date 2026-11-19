@@ -2,6 +2,37 @@
 两个 expert 使用本模式 YAML 的 `expert_parameters.magnetic_attach_above`（默认 0.85）和
 `magnetic_release_below`（默认 0.05）作六腿统一判断；中间区不确认吸附或释放，不影响 valid。
 
+## complex H5 记录
+
+complex 仿真和实物共用记录功能，默认启用；可在 YAML 中设置
+`recording: {enabled: false}` 关闭。其他专家不会创建记录文件。
+依赖 `python3-h5py`（可通过 `rosdep install --from-paths src --ignore-src -y` 安装项目依赖）。
+从节点启动到退出，一次运行生成一份 `${data_root}/h5_log/complex_时间_唯一标识.h5`；
+`data_root` 默认是工作区的 `data`，也可使用 launch 的 `data_root` 参数指定。
+reset 不分文件，暂停、失能和故障仍继续记录。
+
+`feedback/{pose,motor,servo,magnetic}` 按消息到达保存源 ROS 时间戳 `stamp_ns`、
+主机单调接收时间 `received_ns`、有效标记和原始反馈。
+pose 保存世界系位置和 xyzw 四元数；motor 保存位置、传感器速度和力矩；
+servo 保存角度；magnetic 保存吸附比例和使能。不会差分推算机身速度。
+反馈未到达时对应数据集为空；无效数据仍保存，但 `valid=false`，不可当成有效测量。
+
+`runner` 按控制周期保存状态、初始化阶段、reset/compute 计数、失能/吸附关闭标记和故障原因；
+`planning` 保存规划落脚点 `landing_leg` / `landing_world`、支撑标记 `stance`、
+六腿 `trajectory_index` / `trajectory_id`、`body_trajectory_id` 和摆动规划失败信息。
+`stance=true` 为支撑腿，false 为摆动腿。规划信息与传感器测量分组保存。
+
+`trajectories/feet` 与 `trajectories/body` 为轨迹版本表，含 `id, offset, length, received_ns`，
+feet 表额外含 `leg`。用 offset 和 length 从 `feet_points` / `body_points` 切片重建整条轨迹；
+长度为零表示轨迹清空。相同轨迹不重复保存，单腿内容变化独立产生新版本。
+feet_points 为各腿基坐标系 B 下的 `(N,3)` 点，body_points 为世界系下的 `(N,4,4)` 机身位姿。
+轨迹采样间隔见文件属性 `trajectory_dt`；腿顺序、配置、单位和坐标系也在属性中。
+
+H5 单独线程分块追加，每秒 flush，正常退出会排空队列并关闭。
+文件属性 `normal_close=true, incomplete=false` 表示正常完成；强制结束进程可能丢失最近尚未刷新的数据，
+不保证文件可恢复。队列溢出、路径不可写或写盘失败会打印红色错误并停止记录，控制继续运行；
+能继续写入文件时保存错误和 `incomplete=true`。记录线程不执行机器人控制。
+
 ## 感知输入
 
 climb 固定配置 `pose_source: gravity`，订阅 `/hex/perception/gravity`：
@@ -63,6 +94,58 @@ python3 src/hex_runner/scripts/test_ros_integration.py --backend isaac --mode cl
 
 ## 初始化与仿真初态文件
 
+目标计算方法和物理过渡独立配置。`method` 选择 Expert 如何计算最终初态，省略时统一为
+`set_init`；`staged` 选择 runner 是否执行过渡，省略时统一为 `false`，不由专家类型或方法名推导。
+仓库 climb YAML 显式开启过渡；complex YAML 使用 SE3 目标并关闭过渡；四足暂不支持开启过渡，
+配置为 `staged: true` 时会在加载阶段报错。
+
+设置 `staged: true` 时，收到 `/hex/runner/reset` 后才执行：
+循环发送模式 0、关闭全部磁吸 → 等待新鲜完整反馈并确认全部释放 → 模式 1 插值到
+程序内六脚抬起参考位 → 模式 1 插值到配置目标并调用现有专家前馈 →
+按 `magnetic_hz` 循环设置配置磁吸 → 确认开启腿吸附、关闭腿释放后进入 READY。
+没有完整反馈也允许提交此 reset，等待阶段仅发送模式 0 和磁吸关闭命令，不发送舵机目标。
+首次反馈等待及吸附等待持续到满足条件；运动期间反馈失效则进入 FAULT。
+初始化中拒绝运动指令，失能或释放磁吸可中断；恢复需重新 reset。
+
+```yaml
+initialization:
+  method: set_init  # complex 也可以选择 set_init_by_se3
+  staged: true     # false 直接应用最终目标；true 执行过渡
+```
+
+complex 的 `set_init` 和 `set_init_by_se3` 都可独立设置 staged。
+`prepare_initialization()` 每次 reset 只准备一次目标，过渡结束由 `finish_initialization()`
+提交缓存的最终状态并保留前馈，不会再次选点或求解。`staged: false` 时直接应用准备结果并进入 READY。
+
+complex 选择 `set_init` 时，在现有机身 pose/waypoint_index、分组和 IK 分支之外，
+手动目标复用 climb 的 `initial_state.mode: joints` 加 `q`，或 `mode: feet` 加 `frame: leg`、`feet`。
+每腿字段按 lb/lf/lm/rb/rf/rm 命名；关节目标指定 thigh/knee/ankle，foot 角由专家计算。
+示例（其他 initial_state 字段仍需提供）：
+
+```yaml
+initial_state:
+  mode: feet
+  frame: leg
+  feet:
+    lb: {x: 0.18, y: 0.08, z: -0.08}
+    lf: {x: 0.18, y: -0.08, z: -0.08}
+    lm: {x: 0.19, y: 0, z: -0.02}
+    rb: {x: 0.18, y: -0.08, z: -0.02}
+    rf: {x: 0.18, y: 0.08, z: -0.02}
+    rm: {x: 0.19, y: 0, z: -0.08}
+```
+
+抬脚参考位内设于程序：四角腿局部坐标 x=0.18、y=±0.08、z=0.04 m，中腿为
+(0.19,0,0.04) m。按当前 IK 分支求解，不从 YAML 读取。
+插值为五次平滑曲线，最大关节速度 0.3 rad/s；每段结束需电机误差不超过 0.03 rad、
+舵机误差不超过 0.05 rad，连续满足 10 个新电机反馈样本。重复样本不推进流程。
+第二段按专家配置的初始步态和吸附目标计算现有前馈，实际磁吸命令仍保持关闭，
+到达目标后才开启。无支撑目标时 climb 的现有前馈可能为零，不额外新增补偿算法。
+诊断包含 initialization_stage、initialization_waiting_reason、initialization_waiting_legs、
+initialization_motor_error 和 initialization_servo_error；reset_count 在成功完成时才增加。
+四足保留直接初始化，complex 的 SetInitBySE3 函数内部逻辑不变。所有目标控制使用模式 1，
+ROS 电机模式 2 已删除；模式 0 为零力矩，模式 -1 为失能。
+
 runner 只解析 YAML 参数，直接创建 `ExpertComplex(...)` 或 `ExpertClimb(...)`。
 Expert 在创建时完成模型加载和初态计算；complex 还加载唯一一套 voxel 与参考路径。
 Adapter 不单独保存路径或环境，规划和完成判断使用 Expert 内部状态。
@@ -89,7 +172,7 @@ runner 初始化失败则不创建仿真。不靠旧文件是否存在判断就�
 sim 从该文件获取路径绘制数据，原 `/hex/reference_path` topic 已删除。
 
 收到 reset 前，runner 不发送执行器命令。runner reset 复用 Expert 的模型和缓存，
-重新初始化、写文件并发送一次电机（option=2）与舵机目标；READY 阶段全部 foot 舵机使能，RUNNING 后恢复步态使能规则。
+SetInitBySE3/四足直接初始化后写文件并发送一次电机（option=1）与舵机目标；READY 阶段全部 foot 舵机使能，RUNNING 后恢复步态使能规则。
 电机和舵机仅在 reset 成功、每次专家成功 compute（电机 option=1）或 disable_actuators（电机 option=-1、舵机全部失能）时各发送一次。
 空闲、暂停、完成、故障及没有新电机反馈的 tick 不重复发送缓存目标；磁吸继续按 magnetic_hz 发布。
 sim 物理 reset 重新读取文件并恢复初态和绘制路径。两种 reset 独立，不因文件修改自动重置物理机器人。

@@ -86,10 +86,16 @@ python3 -m unittest discover -s src/hex_expert/tests -v
 
 ## complex 环境初始化
 
+complex 可通过 runner 的 `initialization.method: set_init` 选择手动目标初始化，
+`ExpertComplex.SetInit(q_init, initial_pose=.../initial_waypoint_index=...)` 只建立目标及重置历史；
+两种方法都只计算最终初态。物理分段动作由独立的 `initialization.staged` 开关决定，默认 false。
+complex 仓库 YAML 显式使用 `set_init_by_se3`、`staged: false`；改为 true 即可过渡到 SE3 求出的目标。
+climb 的 SetInit 也只建立目标；staged 为 true 时，runner 执行零力矩等待、抬脚、目标插值和磁吸确认。
+
 runner 直接创建 ExpertComplex，传入 robot_urdf、resources、initial_pose、ik_branch 等参数；
 构造函数加载缓存和路径并调用 `SetInitBySE3()`。不提供 `from_config()`。
-显式注入模型的低层调用仍采用 `LoadSE3(path)` → `SetInitBySE3()`；旧 `SetInit(q_init)`、
-`Reset(q_init)` 接口已移除。再次调用 `SetInitBySE3()` 会清空运行历史并重新选点，
+显式注入模型的低层调用采用 `LoadSE3(path)` → `SetInitBySE3()` 或手动 `SetInit(q_init)`；
+不提供 `Reset(q_init)`。再次调用 `SetInitBySE3()` 会清空运行历史并重新选点，
 保留控制周期、速度、力矩限值和已加载路径。
 
 ```python
@@ -129,7 +135,7 @@ ankle 根据对应末端和 IK 分支查缓存后转换至同一机身系。每�
 支撑法向同步到 `B_support_n` 和 `B_landing_n`。未传实际 `attached` 反馈时，
 初始化前馈为零，由后续 `RequestSingleStep` 计算。
 
-complex YAML 的 `initial_state` 仅保留机身 `pose`、`groups`、`stance_group`、
+complex 的 SetInitBySE3 路径中，`initial_state` 仅保留机身 `pose`、`groups`、`stance_group`、
 `ik_branch`、`magnetic` 和 `servo_enabled`，不再支持 `mode/q/feet/frame`。
 runner 从 Expert 取得计算结果并生成 `hex_runner/config/to_sim_info.yaml`，Expert 本身不写文件。
 仿真只读取该文件获得初态和参考路径，不加载规划地图或调用专家。

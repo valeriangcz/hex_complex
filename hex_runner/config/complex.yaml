@@ -1,5 +1,10 @@
 workspace_root: ../../..
 expert_type: complex
+recording:
+  enabled: true
+initialization:
+  method: set_init_by_se3
+  staged: false
 pose_source: se3
 control_dt: 0.01
 magnetic_hz: 50.0

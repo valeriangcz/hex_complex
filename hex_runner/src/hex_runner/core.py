@@ -4,10 +4,12 @@ from enum import Enum
 from threading import RLock
 import numpy as np
 from hex_kinematic import LEG_NAMES
+from .console import banner
 
 
 class Phase(str, Enum):
     WAITING = "WAITING"
+    INITIALIZING = "INITIALIZING"
     READY = "READY"
     RUNNING = "RUNNING"
     PAUSED = "PAUSED"
@@ -86,6 +88,14 @@ class FeedbackCache:
                             motor_sample=self.values["motor"][3],
                             gravity_direction_body=pose if pose_source == "gravity" else None), "", ages
 
+    def motor_snapshot(self, now, timeout):
+        """Read fresh motor feedback independently of servo, magnets and pose."""
+        with self.lock:
+            item = self.values.get('motor')
+            if item is None or not item[2] or max(0.0,now-item[1]) > timeout:
+                return None
+            return (item[0][0].copy(),item[0][1].copy(),item[3])
+
 
 class Runner:
     def __init__(self, config, adapter):
@@ -103,7 +113,9 @@ class Runner:
         self.reset_count = 0
         self.actuator_output = None  # This tick only: reset, compute, or disable.
         self.events = []
+        self.initialization = None
         self.lock = RLock()
+        banner("RUNNER", "WAITING", "等待初始化")
 
     def request(self, action, ready):
         # Service callbacks submit requests; tick owns state changes and expert calls.
@@ -117,7 +129,7 @@ class Runner:
                 return False, "unknown operation"
             if action in ("start", "pause") and self.config.expert_type != "complex":
                 return False, action + " applies only to complex"
-            if action == "reset" and not ready:
+            if action == "reset" and not ready and not self.config.staged_initialization:
                 return False, "device feedback is not ready"
             if action == "start" and (self.motor_servo_disabled or self.magnetic_forced_off):
                 return False, "reset required after actuator disable or magnet release"
@@ -143,6 +155,15 @@ class Runner:
     def _phase(self, phase, reason=""):
         if self.phase != phase or reason:
             self.events.append({"phase": phase.value, "reason": reason})
+        if self.phase != phase or (reason and reason != getattr(self, "_printed_reason", "")):
+            messages = {Phase.WAITING: "等待初始化", Phase.INITIALIZING: "开始初始化",
+                        Phase.READY: "准备就绪", Phase.RUNNING: "开始运行",
+                        Phase.PAUSED: "已暂停", Phase.COMPLETED: "运行完成", Phase.FAULT: "故障"}
+            color = ("red" if phase == Phase.FAULT else "yellow" if phase == Phase.PAUSED
+                     else "green" if phase in (Phase.READY, Phase.COMPLETED) else "cyan")
+            message = messages[phase] + ("；" + reason if reason else "")
+            banner("RUNNER", self.phase.value + " -> " + phase.value, message, color)
+            self._printed_reason = reason
         self.phase = phase
 
     def tick(self, feedback, unavailable=""):
@@ -153,29 +174,54 @@ class Runner:
                 if self.pending_disables:
                     if "disable_actuators" in self.pending_disables:
                         self.actuator_output = "disable"
+                        banner("RUNNER", "DISABLE", "电机/舵机失能指令已处理", "yellow")
+                    if "release_magnets" in self.pending_disables:
+                        banner("RUNNER", "RELEASE_MAGNETS", "吸附关闭指令已处理", "yellow")
                     self.motor_servo_disabled |= "disable_actuators" in self.pending_disables
                     self.magnetic_forced_off |= "release_magnets" in self.pending_disables
                     self.pending_disables.clear()
                     self.pending = None
+                    self.initialization = None
                     self.velocity[:] = 0
                     if self.phase != Phase.FAULT:
                         self._phase(Phase.WAITING if self.command is None else Phase.PAUSED)
                     return self.command
                 action, self.pending = self.pending, None
                 if action == "reset":
-                    if feedback is None:
-                        raise ValueError("reset lost feedback: " + unavailable)
+                    staged = self.config.staged_initialization
                     if self.config.initial_state is None:
                         raise ValueError("initial_state is required for reset")
-                    self.command = Command(*self.adapter.reset(feedback))
+                    if staged:
+                        from .initialization import StagedInitialization
+                        self.initialization = StagedInitialization(self.config,self.adapter)
+                        self.command = None
+                    else:
+                        if feedback is None:
+                            raise ValueError("reset lost feedback: " + unavailable)
+                        self.command = Command(*self.adapter.prepare_initialization())
+                        self.initialization = None
                     self.motor_servo_disabled = False
                     self.magnetic_forced_off = False
                     self.velocity[:] = 0
                     self.failure_reason = ""
-                    self.last_motor_sample = feedback.motor_sample
-                    self.reset_count += 1
-                    self._phase(Phase.READY)
-                    self.actuator_output = "reset"
+                    if staged:
+                        self._phase(Phase.INITIALIZING)
+                    else:
+                        self.last_motor_sample = feedback.motor_sample
+                        self.reset_count += 1
+                        banner("INIT", "COMPLETE", "初始化完成", "green")
+                        self._phase(Phase.READY)
+                        self.actuator_output = "reset"
+                        return self.command
+                if self.phase == Phase.INITIALIZING:
+                    candidate,output,complete = self.initialization.step(feedback,unavailable)
+                    if candidate is not None and (np.abs(candidate.tau)>self.config.motor_torque_limit+1e-6).any():
+                        raise ValueError('initialization exceeded configured torque limit')
+                    self.command,self.actuator_output = candidate,output
+                    if complete:
+                        self.reset_count += 1
+                        self.last_motor_sample = feedback.motor_sample
+                        self._phase(Phase.READY)
                     return self.command
                 if self.command is None:
                     return None
@@ -208,6 +254,7 @@ class Runner:
                 if complete:
                     self._phase(Phase.COMPLETED)
             except Exception as exc:
+                self.actuator_output = None
                 self.failure_reason = str(exc)
                 self._phase(Phase.FAULT, self.failure_reason)
             return self.command

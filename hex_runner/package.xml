@@ -16,6 +16,7 @@
   <depend>hex_expert</depend>
   <depend>hex_se3</depend>
   <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>python3-h5py</exec_depend>
   <exec_depend>python3-yaml</exec_depend>
   <exec_depend>roslaunch</exec_depend>
   <exec_depend>hex_isaacgym</exec_depend>

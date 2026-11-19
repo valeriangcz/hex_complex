@@ -1,11 +1,8 @@
-# 电机消息 option（reset 使用2，compute 使用1，disable 使用-1）：
-#   -1 失能 disable
-#    0 零力矩 zero torque
-#    1 MIT 模式（position/vel/tau + kp/kd 全参数控制）
-#    2 位置速度模式（使用 position/vel，忽略 tau/kp/kd）
-
 workspace_root: ../../..
 expert_type: climb
+initialization:
+  method: set_init
+  staged: true
 pose_source: gravity
 control_dt: 0.01
 magnetic_hz: 30.0

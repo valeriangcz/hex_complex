@@ -21,8 +21,7 @@ enum class HighLevelMode : int
 {
   Disable = -1,
   ZeroTorque = 0,
-  PosVel = 1,
-  TrajFollow = 2
+  MIT = 1
 };
 
 struct MotorRuntime
@@ -47,15 +46,6 @@ struct LegGroup
   std::array<int, 3> ids;
   std::array<double, 3> pn;
 };
-
-int toControlModeCode(const int mode)
-{
-  if (mode <= 1)
-  {
-    return static_cast<int>(damiao::Control_Mode_Code::MIT);
-  }
-  return static_cast<int>(damiao::Control_Mode_Code::POS_VEL);
-}
 
 // 关节顺序与消息字段对应：0=脚踝(ankle), 1=膝关节(knee), 2=大腿(thigh)
 // 即组内 CAN ID 从小到大：如 lf 腿 1/2/3 = 脚踝/膝/大腿
@@ -271,6 +261,11 @@ private:
   {
     std::lock_guard<std::mutex> lock(mutex_);
     const int option = msg->option;
+    if (option != -1 && option != 0 && option != 1)
+    {
+      ROS_WARN_THROTTLE(1.0, "reject unsupported motor option %d", option);
+      return;
+    }
     current_option_ = option;
 
     for (std::size_t g = 0; g < groups_.size(); ++g)
@@ -309,8 +304,7 @@ private:
     }
 
     setMotorEnable(motor, true);
-    const int target_mode = toControlModeCode(option);
-    switchMotorMode(motor, target_mode);
+    switchMotorMode(motor);
 
     if (option == static_cast<int>(HighLevelMode::ZeroTorque))
     {
@@ -323,9 +317,9 @@ private:
     }
   }
 
-  void switchMotorMode(MotorRuntime& motor, int mode_code)
+  void switchMotorMode(MotorRuntime& motor)
   {
-    mode_code = static_cast<int>(damiao::Control_Mode_Code::MIT);
+    const int mode_code = static_cast<int>(damiao::Control_Mode_Code::MIT);
     if (motor.mode_code == mode_code)
     {
       return;
@@ -371,16 +365,7 @@ private:
                                  static_cast<float>(motor.cmd_vel),
                                  static_cast<float>(motor.cmd_tau));
       }
-      else if (motor.mode_code == static_cast<int>(damiao::Control_Mode_Code::POS_VEL))
-      {
-        controller_->control_pos_vel(*motor.motor,
-                                     static_cast<float>(motor.cmd_pos),
-                                     static_cast<float>(motor.cmd_vel));
-      }
-      else if (motor.mode_code == static_cast<int>(damiao::Control_Mode_Code::VEL))
-      {
-        controller_->control_vel(*motor.motor, static_cast<float>(motor.cmd_vel));
-      }
+
     }
   }
 

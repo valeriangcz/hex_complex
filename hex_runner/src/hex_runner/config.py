@@ -38,7 +38,7 @@ class InitialParameters:
     waypoint_index: object = None
 
 
-def initial_parameters(values, expert_type):
+def initial_parameters(values, expert_type, initialization_method='set_init'):
     leg_names = QUAD_LEG_NAMES if expert_type == "quad_climb" else LEG_NAMES
     data = dict(values)
     if ('pose' in data) == ('waypoint_index' in data):
@@ -80,7 +80,7 @@ def initial_parameters(values, expert_type):
         data.pop('servo_enabled'),waypoint_index=waypoint_index,**gait)
     if initial.servo_enabled is not True:
         raise ValueError('initial_state must explicitly enable servos')
-    if expert_type in ('climb', 'quad_climb'):
+    if expert_type in ('climb', 'quad_climb') or initialization_method == 'set_init':
         mode = data.pop('mode')
         if mode == 'joints':
             entries = named(data.pop('q'),leg_names,'initial_state.q')
@@ -121,12 +121,39 @@ class RunnerConfig:
     initial_state: object = None
     to_sim_info: Path = None
     data_root: Path = None
+    initialization: dict = field(default_factory=dict)
+    recording: dict = field(default_factory=dict)
+
+    @property
+    def recording_enabled(self):
+        return self.expert_type == 'complex' and self.recording.get('enabled', True)
+
+    @property
+    def initialization_method(self):
+        return self.initialization.get('method', 'set_init')
+
+    @property
+    def staged_initialization(self):
+        return self.initialization.get('staged', False)
 
     @property
     def leg_names(self):
         return QUAD_LEG_NAMES if self.expert_type == "quad_climb" else LEG_NAMES
 
     def __post_init__(self):
+        if (not isinstance(self.recording, dict) or set(self.recording)-{'enabled'}
+                or type(self.recording.get('enabled', True)) is not bool):
+            raise ValueError('recording supports only a boolean enabled')
+        if not isinstance(self.initialization,dict) or set(self.initialization)-{'method','staged'}:
+            raise ValueError('initialization supports only method and staged')
+        if type(self.staged_initialization) is not bool:
+            raise ValueError('initialization.staged must be a boolean')
+        if self.expert_type == 'quad_climb' and self.staged_initialization:
+            raise ValueError('staged initialization currently supports six-leg robots only')
+        if self.initialization_method not in ('set_init','set_init_by_se3'):
+            raise ValueError('initialization.method must be set_init or set_init_by_se3')
+        if self.expert_type != 'complex' and self.initialization_method != 'set_init':
+            raise ValueError('set_init_by_se3 applies only to complex')
         if self.expert_type not in ("climb", "quad_climb", "complex") or self.pose_source not in ("gravity", "se3"):
             raise ValueError("expert_type must be climb/quad_climb/complex and pose_source gravity/se3")
         if self.expert_type == "complex" and self.pose_source != "se3":
@@ -157,7 +184,8 @@ class RunnerConfig:
         data["robot_urdf"] = str(resource_path(data.get("robot_urdf",cls.robot_urdf),filename.parent))
         data["to_sim_info"] = resource_path(to_sim_info or data.get("to_sim_info") or
             "package://hex_runner/config/to_sim_info.yaml",filename.parent)
-        data["initial_state"] = initial_parameters(data["initial_state"],data["expert_type"])
+        method = data.get('initialization',{}).get('method', 'set_init')
+        data["initial_state"] = initial_parameters(data["initial_state"],data["expert_type"],method)
         config = cls(**data)
         if config.expert_type in ("climb", "quad_climb") and not config.velocity_scales:
             raise ValueError("climb configuration requires velocity_scales.vx/vy/wz")

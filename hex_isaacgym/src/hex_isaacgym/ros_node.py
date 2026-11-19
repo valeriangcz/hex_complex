@@ -53,12 +53,12 @@ class SimulationNode:
                                servo_enabled=np.full(len(self.config.leg_names), self.config.servo_enabled, dtype=bool))
 
     def _motor(self, message):
-        if message.option not in (-1, 0, 1, 2):
+        if message.option not in (-1, 0, 1):
             rospy.logwarn_throttle(1., "sim rejects unsupported motor mode %s", message.option)
             return
         try:
             with self.lock:
-                if message.option in (1, 2):
+                if message.option == 1:
                     pos, tau, velocity, kp, kd = [read_motor(message, name, self.config.leg_names)
                                                 for name in ("pos", "tau", "vel", "kp", "kd")]
                     if not all(np.isfinite(value).all() for value in (pos, tau, velocity, kp, kd)):

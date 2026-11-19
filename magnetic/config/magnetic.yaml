@@ -1,6 +1,6 @@
 # 示例值，必须用实测数据标定有效范围、腿序和每腿 raw_min/raw_max。
 # raw_min 对应 0%，raw_max 对应 100%；有效范围独立于归一化标定。
-port: /dev/ttyUSB0
+port: /dev/stm32
 baud_rate: 115200
 channel_order: [lf, lm, lb, rf, rm, rb]
 lower_bound: 0

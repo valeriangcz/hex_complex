@@ -1,6 +1,9 @@
 # Four-leg indices: 0=lf, 1=lb, 2=rf, 3=rb; one swing leg at a time.
 workspace_root: ../../..
 expert_type: quad_climb
+initialization:
+  method: set_init
+  staged: false
 pose_source: gravity
 control_dt: 0.01
 magnetic_hz: 30.0
