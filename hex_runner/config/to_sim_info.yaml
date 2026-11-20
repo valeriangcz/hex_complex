@@ -6,7 +6,7 @@ leg_names:
 - rf
 - rm
 expert_type: climb
-robot_urdf: /home/nv/BIH_ws/hex_complex/src/hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
+robot_urdf: /home/val/BIH_ws/hex_complex/src/hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 initial_state:
   W_T_R:
   - - 1.0

@@ -137,8 +137,10 @@ initial_state:
 
 抬脚参考位内设于程序：四角腿局部坐标 x=0.18、y=±0.08、z=0.04 m，中腿为
 (0.19,0,0.04) m。按当前 IK 分支求解，不从 YAML 读取。
-插值为五次平滑曲线，最大关节速度 0.3 rad/s；每段结束需电机误差不超过 0.03 rad、
-舵机误差不超过 0.05 rad，连续满足 10 个新电机反馈样本。重复样本不推进流程。
+插值为五次平滑曲线，速度及到位阈值由 `StagedInitialization` 的常量配置。
+进入插值后按 `control_dt` 每个控制 tick 推进并发布电机、舵机目标，不等待新电机样本；
+每段结束需实测电机和舵机误差连续 10 个控制 tick 满足到位阈值。
+零力矩命令发出后仍先等待新电机样本；反馈有效性及超时检查继续生效。
 第二段按专家配置的初始步态和吸附目标计算现有前馈，实际磁吸命令仍保持关闭，
 到达目标后才开启。无支撑目标时 climb 的现有前馈可能为零，不额外新增补偿算法。
 诊断包含 initialization_stage、initialization_waiting_reason、initialization_waiting_legs、
@@ -173,8 +175,9 @@ sim 从该文件获取路径绘制数据，原 `/hex/reference_path` topic 已�
 
 收到 reset 前，runner 不发送执行器命令。runner reset 复用 Expert 的模型和缓存，
 SetInitBySE3/四足直接初始化后写文件并发送一次电机（option=1）与舵机目标；READY 阶段全部 foot 舵机使能，RUNNING 后恢复步态使能规则。
-电机和舵机仅在 reset 成功、每次专家成功 compute（电机 option=1）或 disable_actuators（电机 option=-1、舵机全部失能）时各发送一次。
-空闲、暂停、完成、故障及没有新电机反馈的 tick 不重复发送缓存目标；磁吸继续按 magnetic_hz 发布。
+分段初始化的插值和等待吸附阶段每个控制 tick 发布电机、舵机目标（电机 option=1）。
+直接 reset 成功、每次专家成功 compute 或 disable_actuators 时也各发送一次。
+空闲、暂停、完成、故障及正常运动中没有新电机反馈的 tick 不重复发送缓存目标；磁吸继续按 magnetic_hz 发布。
 sim 物理 reset 重新读取文件并恢复初态和绘制路径。两种 reset 独立，不因文件修改自动重置物理机器人。
 操作时先暂停控制，再完成需要的 runner 初始化文件更新，最后触发 sim reset；不要同时重写和读取该文件。
 单独启动 sim 时，文件不存在或无法读取会直接报错退出。

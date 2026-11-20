@@ -1,4 +1,4 @@
-"""Feedback-driven six-leg initialization, independent of ROS transport."""
+"""Control-period-driven six-leg initialization, independent of ROS transport."""
 from enum import Enum
 import numpy as np
 from .core import Command, finite
@@ -24,7 +24,6 @@ class StagedInitialization:
         self.config, self.adapter = config, adapter
         self.stage = None
         self._set_stage(InitStage.WAIT_FEEDBACK)
-        self.last_sample = None
         self.command = None
         self.confirmed = 0
         self.elapsed = 0.0
@@ -92,13 +91,10 @@ class StagedInitialization:
             self.goal = Command(*self.adapter.prepare_initialization())
             self._segment(feedback.q,self.adapter.initialization_lift_target(),InitStage.LIFT)
             self.command = Command(feedback.q,np.zeros((6,3)),np.zeros(6,dtype=bool),np.ones(6,dtype=bool))
-            self.last_sample = feedback.motor_sample
             return self.command, 'initialize', False
         if feedback is None:
             raise ValueError('initialization lost feedback: '+unavailable)
-        if feedback.motor_sample == self.last_sample:
-            return self.command, None, False
-        self.last_sample = feedback.motor_sample
+        # Advance and publish every control tick using the latest valid feedback.
         if self.stage in (InitStage.LIFT,InitStage.MOVE_TARGET):
             self.elapsed = min(self.duration,self.elapsed+self.config.control_dt)
             u = self.elapsed/self.duration
