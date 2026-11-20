@@ -8,5 +8,6 @@
     <!-- Explicit launch arguments take precedence over the YAML file. -->
     <param if="$(eval arg('port') != '')" name="port" value="$(arg port)"/>
     <param if="$(eval arg('baud_rate') != '')" name="baud_rate" value="$(arg baud_rate)" type="int"/>
+    <remap from="servo_cmd" to="hex/servo/command"/><remap from="servo_state" to="hex/servo/state"/>
   </node>
 </launch>
