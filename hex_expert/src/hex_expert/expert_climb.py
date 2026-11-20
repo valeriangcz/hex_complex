@@ -27,8 +27,9 @@ class ExpertClimb:
         contact_force_threshold=7.0,
         contact_confirm_steps=10, contact_velocity_threshold=0.03,
         torque_blend_time=0.1, stance_height=0.08,
-        joint_position_gain=80.0,
+        joint_position_gain=40.0,
         magnetic_attach_above=0.85, magnetic_release_below=0.05,
+        operating_mode='suspended',
     ):
         self.groups = groups
         self.initial_stance_group = stance_group
@@ -49,6 +50,9 @@ class ExpertClimb:
             joint_position_gain=joint_position_gain,
             magnetic_attach_above=magnetic_attach_above,
             magnetic_release_below=magnetic_release_below)
+        if operating_mode not in ('suspended', 'ground'):
+            raise ValueError('operating_mode must be suspended or ground')
+        self.operating_mode = operating_mode
 
     def _InitController(
         self, kinematic=None, *, control_dt=0.01, motor_torque_limits=27.0,
@@ -85,6 +89,8 @@ class ExpertClimb:
             raise ValueError("motor_torque_limits must be positive finite scalar or (num_legs,3)")
 
         self.kin = kinematic
+        # 四足仍沿用原行为；六足构造函数明确选择悬空或地面模式。
+        self.operating_mode = None
         if not 0 <= magnetic_release_below < magnetic_attach_above <= 1:
             raise ValueError("require 0 <= magnetic_release_below < magnetic_attach_above <= 1")
         self.magnetic_attach_above = magnetic_attach_above
@@ -233,11 +239,12 @@ class ExpertClimb:
             self.q_des[:, 3] = -self.q_des[:, 1] - self.q_des[:, 2] - np.pi / 2.0
         else:
             self.contact_count.fill(0)
-        com = self.kin.ForwardKinAll(q_cur)["R_com"]
+        com = (np.zeros(3) if self.operating_mode == 'suspended'
+               else self.kin.ForwardKinAll(q_cur)["R_com"])
         self._ComputeQuasiStaticTauFF(gravity_body, q_cur[:, :3], com)
         self.compute_count += 1
-        #暂时取消力前馈
-        self.tau_ff.fill(0.0)
+        if self.operating_mode is None:  # 保留未迁移的四足调试行为。
+            self.tau_ff.fill(0.0)
         return self.q_des.copy(), self.tau_ff.copy(), self.adhesions.copy(), ~self.gaits.copy()
 
     def _ContactDetection(self, q_cur, q_torque):
@@ -268,8 +275,9 @@ class ExpertClimb:
         self.contact_count[detected] = 0
         self.B_support_n[:, detected] = self.B_landing_n[:, detected]
         
-        #为了方便调试，加入使用高度判断的落地检测
-        detected = (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
+        # 悬空测试没有接触压力；地面模式使用上面的连续压力和速度判定。
+        if self.operating_mode != 'ground':
+            detected = (~self.gaits & self._swing_reached & (feet[:,2] <= -self.stance_height))
         return detected
 
     def _PlanGait(self, command, q_cur, q_torque, attached):
@@ -405,7 +413,7 @@ class ExpertClimb:
         indices = np.flatnonzero(support)
         target_tau = np.zeros((self.num_legs, 3))
         self.static_contact_forces_R.fill(0.0)
-        if indices.size:
+        if indices.size and self.operating_mode != 'suspended':
             feet_R = self.kin._B2R(self.B_e_cur[:, indices], indices).T
             forces = self._SolveSupportForces(feet_R - R_com, gravity_body)
             if forces is not None:
@@ -427,3 +435,9 @@ class ExpertClimb:
             self.tau_ff[:] = target_tau
         self.tau_ff[:] = np.clip(self.tau_ff, -self.motor_torque_limits, self.motor_torque_limits)
         return self.tau_ff
+
+    def SeedFeedforward(self, tau):
+        """初始化交接沿用当前输出作为混合起点，避免直接切换力矩。"""
+        self.tau_ff[:] = tau
+        self._feedforward_blend_start[:] = tau
+        self._torque_blend_remaining = self.torque_blend_steps

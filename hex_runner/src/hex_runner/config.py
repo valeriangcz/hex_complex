@@ -104,6 +104,7 @@ def initial_parameters(values, expert_type, initialization_method='set_init'):
 @dataclass
 class RunnerConfig:
     expert_type: str = "climb"
+    operating_mode: str = "suspended"
     pose_source: str = "gravity"
     control_dt: float = 0.01
     magnetic_hz: float = 20.0
@@ -141,6 +142,8 @@ class RunnerConfig:
         return QUAD_LEG_NAMES if self.expert_type == "quad_climb" else LEG_NAMES
 
     def __post_init__(self):
+        if self.operating_mode not in ('suspended', 'ground'):
+            raise ValueError('operating_mode must be suspended or ground')
         if (not isinstance(self.recording, dict) or set(self.recording)-{'enabled'}
                 or type(self.recording.get('enabled', True)) is not bool):
             raise ValueError('recording supports only a boolean enabled')

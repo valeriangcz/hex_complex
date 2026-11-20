@@ -1,5 +1,13 @@
 # hex_expert
 
+六足 climb 同时提供 C++ 库 `hex_expert_cpp`，头文件为
+`hex_expert/expert_climb.hpp`。C++ runner 直接链接该库和 Eigen 运动学库，
+不需要 Python 绑定。`quad_climb`、`complex` 保留 Python 实现。
+
+六足 `ExpertClimb` 的 `operating_mode` 为 `suspended`（默认）或 `ground`：
+悬空模式关闭支撑力前馈、使用高度落地判定；地面模式启用前馈，并以连续压力及低法向速度
+确认接触。初始化后的前馈交接复用 `torque_blend_time`。Python/C++ 共用这些语义。
+
 ExpertComplex 专家控制算法。runner 传入资源路径和初态参数，由构造函数加载运动学、可行性缓存和轨迹并计算初态；也保留显式注入对象的低层接口用于测试。Expert 不创建仿真器。
 
 `ExpertClimb` 是单环境 NumPy 速度指令爬行专家，复用当前 `Kinematic`
@@ -13,7 +21,7 @@ from hex_expert import ExpertClimb
 
 kin = Kinematic(urdf_path="path/to/hex_all.urdf")
 expert = ExpertClimb(kin, groups=[[0, 1, 5], [2, 3, 4]], stance_group=0, control_dt=0.01,
-                     motor_torque_limits=27.0)
+                     motor_torque_limits=27.0, operating_mode="ground")
 # 所有输入按 lb/lf/lm/rb/rf/rm 顺序。q_cur (6,4)，q_torque (6,3)，
 # attached (6,) 为每足归一化传感器读数，范围 [0, 1]；gravity_direction_body 为机身系向下的重力方向。
 # 每个控制周期用真实反馈调用一次：

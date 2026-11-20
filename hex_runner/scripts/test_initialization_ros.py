@@ -8,6 +8,7 @@ import yaml
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--mode',choices=['climb','complex'],default='climb')
+    parser.add_argument('--implementation',choices=['cpp','python'],default='python')
     parser.add_argument('--backend',choices=['fake','isaac'],default='fake')
     parser.add_argument('--method',choices=['set_init','set_init_by_se3'])
     parser.add_argument('--staged',choices=['true','false'],help='Override independent transition flag')
@@ -76,7 +77,7 @@ def main():
                 for k in ['mode','frame','feet']:data['initial_state'][k]=climb['initial_state'][k]
             config=Path(directory)/'runner.yaml';config.write_text(yaml.safe_dump(data))
             sim_info=Path(directory)/'to_sim_info.yaml'
-            start(['rosrun','hex_runner','runner_node.py','--config',str(config),'--to-sim-info',str(sim_info)])
+            start(['rosrun','hex_runner','runner_node_cpp' if args.implementation=='cpp' else 'runner_node.py','--config',str(config),'--to-sim-info',str(sim_info)])
             wait(lambda:latest.get('expert_type')==args.mode,'runner created')
             rospy.wait_for_service('/hex/runner/reset',timeout=15)
             def reset():
@@ -99,7 +100,7 @@ def main():
             wait(lambda:1 in modes,'mode1 target command',5)
             assert set(modes)<={0,1} and zero_valid[0]
             if staged:assert {'LIFT','MOVE_TARGET','WAIT_ATTACH','COMPLETE'}<=set(stages),stages
-            result=dict(status='PASS',mode=args.mode,method=method,staged=staged,backend=args.backend,
+            result=dict(status='PASS',mode=args.mode,implementation=args.implementation,method=method,staged=staged,backend=args.backend,
                         modes=sorted(set(modes)),zero_commands=modes.count(0),stages=stages,diagnostics=latest)
             args.report.parent.mkdir(parents=True,exist_ok=True)
             args.report.write_text(json.dumps(result,indent=2)+'\n')

@@ -119,6 +119,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--backend',choices=['fake','isaac'],default='fake')
     parser.add_argument('--mode',choices=['climb','quad_climb','complex'],default='climb')
+    parser.add_argument('--implementation',choices=['cpp','python'],default='python')
     parser.add_argument('--joystick',action='store_true',help='Use Joy buttons 1/0/4 for complex reset/start/pause')
     parser.add_argument('--pose-source',choices=['gravity','se3'])
     parser.add_argument('--device',default='cpu')
@@ -204,7 +205,7 @@ def main():
                 config_file=directory+'/runner.yaml'
                 with open(config_file,'w') as stream:yaml.safe_dump(config,stream)
                 sim_info=Path(directory)/'to_sim_info.yaml'
-                runner_process=start(['rosrun','hex_runner','runner_node.py','--config',config_file,
+                runner_process=start(['rosrun','hex_runner','runner_node_cpp' if args.implementation=='cpp' else 'runner_node.py','--config',config_file,
                                       '--data-root',str(workspace/'data'),'--output-dir',directory+'/runs',
                                       '--to-sim-info',str(sim_info)])
                 wait_for(lambda:latest.get('expert_type')==args.mode,'runner initialization',90)
@@ -228,7 +229,7 @@ def main():
                     start(['roslaunch','control_stick','joy_ctrl.launch','start_joy:=false'])
                     joy=rospy.Publisher('joy',Joy,queue_size=1)
                     wait_for(lambda:joy.get_num_connections()>0,'joystick subscription')
-                def service(name,success=True):
+                def service(name,success=True,wait_reset=True):
                     previous_reset = latest.get('reset_count',0)
                     previous_counts = counts.copy()
                     rospy.wait_for_service('hex/runner/'+name,timeout=5)
@@ -243,7 +244,7 @@ def main():
                         return
                     result=rospy.ServiceProxy('hex/runner/'+name,Trigger)()
                     assert result.success==success,result
-                    if name=='reset' and success:
+                    if name=='reset' and success and wait_reset:
                         wait_for(lambda:latest.get('reset_count',0)>previous_reset,'reset completed')
                         wait_for(lambda:all(counts[n]>previous_counts[n] for n in counts),'reset outputs')
                 service('reset')
@@ -367,7 +368,7 @@ def main():
                     service('reset');wait_for(lambda:latest.get('phase')=='READY','fault recovery')
                     stop(device_process)  # Missing providers must become stale, not fabricate state.
                     wait_for(lambda:latest.get('phase')=='FAULT','feedback stream timeout',4)
-                    service('reset',staged)
+                    service('reset',staged,wait_reset=False)
                     if staged:
                         wait_for(lambda:latest.get('phase')=='INITIALIZING','reset waits for unavailable feedback')
                     checks.append('invalid/stale feedback latches fault, holds every output, explicit recovery')
@@ -399,7 +400,7 @@ def main():
                     np.testing.assert_array_equal(read_magnetic(frames['magnetic'][stamp],'enabled_'),initial.magnetic)
                     np.testing.assert_array_equal(read_magnetic(frames['magnetic'][stamp], 'attached_'),initial.magnetic)
                     checks.append('sim zero torque, servo disable, unsupported mode rejection and exact first reset feedback')
-                report=dict(status='PASS',backend=args.backend,mode=args.mode,device=args.device,checks=checks,
+                report=dict(status='PASS',backend=args.backend,mode=args.mode,implementation=args.implementation,device=args.device,checks=checks,
                             compute_count=latest.get('compute_count'),gait_switch_count=latest.get('gait_switch_count'),
                             diagnostics=latest,simulation=sim,motion_metrics=motion_metrics)
                 if args.report:

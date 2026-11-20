@@ -7,6 +7,10 @@
   <depend>diagnostic_msgs</depend>
   <depend>geometry_msgs</depend>
   <depend>rospy</depend>
+  <depend>roscpp</depend>
+  <depend>roslib</depend>
+  <depend>yaml-cpp</depend>
+  <depend>jsoncpp</depend>
   <depend>std_msgs</depend>
   <depend>std_srvs</depend>
   <depend>dm_motor_fusion</depend>

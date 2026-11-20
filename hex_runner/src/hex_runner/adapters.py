@@ -32,6 +32,8 @@ class ExpertAdapter:
                 self.expert.adhesions[:] = initial.magnetic
         else:
             controller = ExpertQuadClimb if config.expert_type == "quad_climb" else ExpertClimb
+            if config.expert_type == 'climb':
+                common['operating_mode'] = config.operating_mode
             self.expert = controller(motor_positions=initial.motor_positions,
                                      foot_positions=initial.foot_positions,**common)
         self.switch_count = 0
@@ -90,6 +92,9 @@ class ExpertAdapter:
 
     def initialization_feedforward(self,feedback,adhesions):
         e = self.expert
+        if self.config.expert_type == 'climb' and self.config.operating_mode == 'suspended':
+            e.tau_ff.fill(0.0)
+            return e.tau_ff.copy()
         fk = e.kin.ForwardKinAll(feedback.q)
         e.B_e_cur[:] = fk['B_foot'].T
         e.adhesions[:] = adhesions
@@ -106,7 +111,10 @@ class ExpertAdapter:
         for name,value in self._initial_target_state.items():
             setattr(self.expert,name,deepcopy(value))
         # Let the expert's existing support-transition blend start at the held torque.
-        self.expert.tau_ff[:] = command.tau
+        if self.config.expert_type == 'climb':
+            self.expert.SeedFeedforward(command.tau)
+        else:
+            self.expert.tau_ff[:] = command.tau
 
     def compute(self, feedback, velocity):
         sequential = self.config.expert_type == "quad_climb"

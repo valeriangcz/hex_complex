@@ -208,6 +208,9 @@ class RunnerNode:
                           failure_reason=self.runner.failure_reason, reset_count=self.runner.reset_count,
                           compute_count=self.runner.compute_count, command=self.runner.velocity.tolist(),
                           servo_enabled=[False]*len(self.config.leg_names) if disabled else (None if command is None else command.servo_enabled.tolist()))
+            values['implementation'] = 'python'
+            if self.config.expert_type == 'climb':
+                values['operating_mode'] = self.config.operating_mode
             values.update(self.runner.adapter.diagnostics())
             if self.runner.initialization is not None:
                 values.update(self.runner.initialization.diagnostics())

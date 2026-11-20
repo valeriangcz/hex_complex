@@ -1,5 +1,6 @@
 <launch>
   <arg name="mode" default="climb"/>
+  <arg name="implementation" default="$(eval 'cpp' if arg('mode') == 'climb' else 'python')"/>
   <arg name="runner_config" default="$(find hex_runner)/config/$(arg mode).yaml"/>
   <arg name="data_root" default=""/>
   <arg name="output_dir" default=""/>
@@ -17,11 +18,12 @@
   </node>
   <node pkg="feetech_servo" type="feetech_servo_interface" name="feetech_servo_interface" output="screen" required="true">
     <rosparam command="load" file="$(arg servo_config)"/>
-    <remap from="servo_cmd" to="hex/servo/command"/><remap from="servo_state" to="hex/servo/state"/>
+    <!-- <remap from="servo_cmd" to="hex/servo/command"/><remap from="servo_state" to="hex/servo/state"/> -->
   </node>
   <include if="$(eval arg('magnetic_launch') != '')" file="$(arg magnetic_launch)"/>
   <include if="$(eval arg('perception_launch') != '')" file="$(arg perception_launch)"/>
   <include file="$(find hex_runner)/launch/runner.launch">
+    <arg name="implementation" value="$(arg implementation)"/>
     <arg name="mode" value="$(arg mode)"/><arg name="config" value="$(arg runner_config)"/>
     <arg name="data_root" value="$(arg data_root)"/><arg name="output_dir" value="$(arg output_dir)"/>
   </include>

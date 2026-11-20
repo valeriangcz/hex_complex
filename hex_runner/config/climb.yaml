@@ -1,10 +1,11 @@
 workspace_root: ../../..
 expert_type: climb
+operating_mode: suspended  # suspended: 悬空关闭支撑力前馈、按高度落地；ground: 开启前馈、按连续受力落地。
 initialization:
   method: set_init
   staged: true
 pose_source: gravity
-control_dt: 0.01
+control_dt: 0.02
 magnetic_hz: 50.0
 feedback_timeout: 0.5
 motor_kp: 100.0
@@ -12,6 +13,7 @@ motor_kd: 1.2
 motor_torque_limit: 27.0
 robot_urdf: package://hex_kinematic/resources/hex_magnetic/urdf/hex_all.urdf
 expert_parameters:
+  joint_position_gain: 40.0  # 足端误差转为关节位置修正的增益，Python/C++ 共用。
   magnetic_attach_above: 0.85  # 六腿统一，高于此比例确认吸附
   magnetic_release_below: 0.2  # 六腿统一，低于此比例确认释放
   contact_force_threshold: 7.0

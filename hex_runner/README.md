@@ -1,3 +1,53 @@
+## 六足 climb 的 C++ 实现
+
+六足 climb 默认使用 `runner_node_cpp`，控制循环、分段初始化、专家和运动学均在
+C++ 内完成，矩阵计算使用 Eigen。Python 实现保留用于对照；`quad_climb` 和 `complex`
+默认仍使用 Python。两种实现使用相同的话题、服务、YAML 配置和仿真初态文件。
+
+```bash
+catkin_make -DCMAKE_BUILD_TYPE=Release -j2
+source devel/setup.zsh
+roslaunch hex_runner runner.launch mode:=climb
+# 切回 Python；real.launch 和 sim.launch 也支持这个参数。
+roslaunch hex_runner runner.launch mode:=climb implementation:=python
+```
+
+在 `config/climb.yaml` 中选择工况，修改后重启 runner：
+
+```yaml
+operating_mode: suspended  # 默认；切换为 ground 使用地面受力判定
+```
+
+| 行为 | suspended | ground |
+| --- | --- | --- |
+| LIFT 前馈 | 零 | 零 |
+| MOVE_TARGET / WAIT_ATTACH 前馈 | 零 | 根据预设初始支撑组计算 |
+| 正常运动前馈 | 零 | 根据当前支撑组计算 |
+| 落地判定 | 测量足端高度 | 连续压力及低法向速度 |
+
+前馈交接和支撑组切换共用 `expert_parameters.torque_blend_time`；零力矩和失能立即执行。
+初始化插值每个控制 tick 发布，不等待新电机样本；正常运动保留新电机样本门控。
+`joint_position_gain` 在共用配置中显式设置为当前值 40，两个实现使用同一增益。
+诊断中通过 `implementation`、`operating_mode` 确认实际运行版本和工况。
+
+新增构建依赖为 Eigen、TinyXML2、yaml-cpp、JsonCpp、roscpp 和 roslib，可通过工作空间的
+`rosdep install --from-paths src --ignore-src -r -y` 安装声明的依赖。模型及算法库导出头文件
+和 catkin 库，无 Python 绑定依赖；C++ runner 仅支持六足 climb，其他模式显式选择 C++ 会报错。
+
+本机验证（假设备测试使用独立 localhost Master，不连接硬件）：
+
+```bash
+python3 -m unittest discover -s src/hex_runner/tests -p test_cpp_migration.py -v
+catkin_make run_tests_hex_runner_gtest_test_hex_runner_core -j2
+python3 src/hex_runner/scripts/test_initialization_ros.py --implementation cpp --backend fake --report /tmp/cpp_init.json
+python3 src/hex_runner/scripts/test_ros_integration.py --implementation cpp --backend fake --motion-seconds 5 --report /tmp/cpp_ros.json
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python3 src/hex_runner/scripts/benchmark_cpp.py --bag data/bag/2026-11-20-11-17-57.bag --mode suspended --report /tmp/cpp_benchmark.json
+```
+
+性能工具只离线读取输入并比较 Python/C++，不发布控制命令；报告专家计算耗时，不包含网络延迟。
+在 Orin 上重新编译并运行相同命令即可获取目标机数据。`hex_cpp_probe` 随启用测试的构建生成，
+供数值对照使用，不属于运行时节点。
+
 磁吸接口：`attached_*` 为归一化浮点读数，`enabled_*` 为实际通电状态。runner 原样传递读数，
 两个 expert 使用本模式 YAML 的 `expert_parameters.magnetic_attach_above`（默认 0.85）和
 `magnetic_release_below`（默认 0.05）作六腿统一判断；中间区不确认吸附或释放，不影响 valid。
@@ -141,7 +191,7 @@ initial_state:
 进入插值后按 `control_dt` 每个控制 tick 推进并发布电机、舵机目标，不等待新电机样本；
 每段结束需实测电机和舵机误差连续 10 个控制 tick 满足到位阈值。
 零力矩命令发出后仍先等待新电机样本；反馈有效性及超时检查继续生效。
-第二段按专家配置的初始步态和吸附目标计算现有前馈，实际磁吸命令仍保持关闭，
+地面模式的第二段按专家配置的初始步态和吸附目标计算前馈，悬空模式输出零前馈；实际磁吸命令仍保持关闭，
 到达目标后才开启。无支撑目标时 climb 的现有前馈可能为零，不额外新增补偿算法。
 诊断包含 initialization_stage、initialization_waiting_reason、initialization_waiting_legs、
 initialization_motor_error 和 initialization_servo_error；reset_count 在成功完成时才增加。
